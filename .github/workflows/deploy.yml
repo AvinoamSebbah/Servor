@@ -28,7 +28,7 @@ jobs:
             git reset --hard origin/main
             
             echo "→ Mise à jour du fichier .env..."
-            printf '%s\n' "${{ secrets.DO_ENV_FILE }}" > .env
+            printf '%s\n' "${{ secrets.DO_ENV_FILE }}" | tr -d '\r' > .env
 
             echo "→ Build et Déploiement unique (Projet: agali)..."
             # -p agali force le nom du projet pour éviter les doublons "dev-..."
