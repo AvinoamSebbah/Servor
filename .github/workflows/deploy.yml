@@ -1,0 +1,45 @@
+name: Deploy to DigitalOcean
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    name: SSH deploy to Droplet
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.DO_HOST }}
+          username: ${{ secrets.DO_USERNAME }}
+          key: ${{ secrets.DO_SSH_KEY }}
+          port: ${{ secrets.DO_PORT }}
+          script: |
+            set -e
+            # On s'assure d'être dans le bon dossier
+            cd /root/app
+
+            echo "→ Mise à jour du code (Git Pull)..."
+            git fetch origin main
+            git reset --hard origin/main
+            
+            echo "→ Mise à jour du fichier .env..."
+            printf '%s\n' "${{ secrets.DO_ENV_FILE }}" > .env
+
+            echo "→ Build et Déploiement unique (Projet: agali)..."
+            # -p agali force le nom du projet pour éviter les doublons "dev-..."
+            # On build le backend et on s'assure que tout est "up"
+            docker compose -p agali up -d --build
+
+            echo "→ Redémarrage de Caddy pour rafraîchir le lien..."
+            docker compose -p agali restart caddy
+
+            echo "→ Nettoyage des images inutilisées pour libérer de l'espace..."
+            # -af nettoie aussi les images de build précédentes qui prennent beaucoup de place
+            docker image prune -af
+
+            echo "✓ Déploiement terminé. Projet 'agali' est à jour."

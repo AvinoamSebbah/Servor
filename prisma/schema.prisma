@@ -1,0 +1,300 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// Stores (Magasins)
+model Store {
+  id             Int      @id @default(autoincrement())
+  chainId        String   @map("chain_id")
+  chainName      String?  @map("chain_name")
+  lastUpdateDate DateTime? @map("last_update_date") @db.Date
+  lastUpdateTime DateTime? @map("last_update_time") @db.Time
+  storeId        String   @map("store_id")
+  bikoretNo      String?  @map("bikoret_no")
+  storeType      String?  @map("store_type")
+  storeName      String?  @map("store_name")
+  address        String?
+  city           String?
+  zipCode        String?  @map("zip_code")
+  
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+  
+  @@unique([chainId, storeId])
+  @@index([chainId])
+  @@index([storeId])
+  @@index([city])
+  @@map("stores")
+}
+
+// Products (Produits)
+model Product {
+  id                          Int      @id @default(autoincrement())
+  itemCode                    String   @unique @map("item_code") // Barcode
+  itemName                    String?  @map("item_name")
+  manufacturerName            String?  @map("manufacturer_name")
+  manufactureCountry          String?  @map("manufacture_country")
+  manufacturerItemDescription String?  @map("manufacturer_item_description")
+  
+  createdAt                   DateTime @default(now()) @map("created_at")
+  updatedAt                   DateTime @updatedAt @map("updated_at")
+  
+  // Relations
+  prices                      Price[]
+  cartItems                   CartItem[]
+  
+  @@index([itemCode])
+  @@map("products")
+}
+
+// Promotions
+model Promotion {
+  id                      Int      @id @default(autoincrement())
+  chainId                 String   @map("chain_id")
+  promotionId             String   @map("promotion_id")
+  subChainId              String?  @map("sub_chain_id")
+  bikoretNo               String?  @map("bikoret_no")
+  promotionDescription    String?  @map("promotion_description")
+  promotionUpdateDate     DateTime? @map("promotion_update_date")
+  promotionStartDate      DateTime? @map("promotion_start_date") @db.Date
+  promotionStartHour      String?  @map("promotion_start_hour")
+  promotionEndDate        DateTime? @map("promotion_end_date") @db.Date
+  promotionEndHour        String?  @map("promotion_end_hour")
+  promotionDays           String?  @map("promotion_days")
+  redemptionLimit         String?  @map("redemption_limit")
+  rewardType              String?  @map("reward_type")
+  allowMultipleDiscounts  String?  @map("allow_multiple_discounts")
+  isWeightedPromo         Boolean? @default(false) @map("is_weighted_promo")
+  isGiftItem              String?  @map("is_gift_item")
+  minNoOfItemOffered      String?  @map("min_no_of_item_offered")
+  additionalIsCoupon      String?  @map("additional_is_coupon")
+  additionalGiftCount     String?  @map("additional_gift_count")
+  additionalIsTotal       String?  @map("additional_is_total")
+  additionalIsActive      String?  @map("additional_is_active")
+  additionalRestrictions  String?  @map("additional_restrictions")
+  remarks                 String?
+  minQty                  String?  @map("min_qty")
+  discountedPrice         String?  @map("discounted_price")
+  discountedPricePerMida  String?  @map("discounted_price_per_mida")
+  weightUnit              String?  @map("weight_unit")
+  clubId                  String?  @map("club_id")
+
+  items                   Json?
+  storePromotions         Json     @default("{}") @map("store_promotions")
+  availableInStoreIds     String[] @default([]) @map("available_in_store_ids")
+
+  createdAt               DateTime? @default(now()) @map("created_at")
+  updatedAt               DateTime? @updatedAt @map("updated_at")
+
+  @@unique([chainId, promotionId])
+  @@index([chainId])
+  @@index([promotionId])
+  @@index([promotionStartDate, promotionEndDate])
+  @@map("promotions")
+}
+
+// Prices (Prix)
+model Price {
+  id                  Int      @id @default(autoincrement())
+  chainId             String   @map("chain_id")
+  itemCode            String   @map("item_code")
+
+  basePrice           String?  @map("base_price")
+  storePrices         Json     @default("{}") @map("store_prices")
+  availableInStoreIds String[] @default([]) @map("available_in_store_ids")
+
+  itemType            String?  @map("item_type")
+  unitQty             String?  @map("unit_qty")
+  quantity            String?
+  unitOfMeasure       String?  @map("unit_of_measure")
+  bIsWeighted         Boolean? @default(false) @map("b_is_weighted")
+  qtyInPackage        String?  @map("qty_in_package")
+  priceUpdateDate     DateTime? @map("price_update_date")
+  allowDiscount       String?  @map("allow_discount")
+  itemStatus          String?  @map("item_status")
+  itemId              String?  @map("item_id")
+
+  createdAt           DateTime? @default(now()) @map("created_at")
+  updatedAt           DateTime? @updatedAt @map("updated_at")
+
+  // Relations
+  product             Product  @relation(fields: [itemCode], references: [itemCode])
+
+  @@unique([chainId, itemCode])
+  @@index([chainId])
+  @@index([itemCode])
+  @@index([priceUpdateDate])
+  @@map("prices")
+}
+// Processed Files (Fichiers traités pour imports incrémentaux)
+model ProcessedFile {
+  id              Int      @id @default(autoincrement())
+  fileName        String   @unique @map("file_name")
+  filePath        String   @map("file_path")
+  fileHash        String   @map("file_hash") // MD5 hash pour détecter les changements
+  fileSize        BigInt   @map("file_size")
+  fileType        String   @map("file_type") // stores, promo, price
+  storeName       String?  @map("store_name") // Nom du dossier (ex: Bareket)
+  recordCount     Int?     @map("record_count") // Nombre d'entités importées
+  processedAt     DateTime @default(now()) @map("processed_at")
+  
+  @@index([fileName])
+  @@index([fileHash])
+  @@index([storeName])
+  @@index([processedAt])
+  @@map("processed_files")
+}
+
+// Users - Utilisateurs de l'application
+model User {
+  id                String   @id @default(cuid())
+  email             String   @unique
+  emailVerified     DateTime? @map("email_verified")
+  passwordHash      String   @map("password_hash")
+  name              String?
+  firstName         String?  @map("first_name")
+  lastName          String?  @map("last_name")
+  gender            String?  // male, female, other
+  dateOfBirth       DateTime? @map("date_of_birth") @db.Date
+  phoneNumber       String?  @map("phone_number")
+  city              String?
+  address           String?
+  zipCode           String?  @map("zip_code")
+  image             String?
+  
+  createdAt         DateTime @default(now()) @map("created_at")
+  updatedAt         DateTime @updatedAt @map("updated_at")
+  
+  // Relations
+  preferences       UserPreference?
+  carts             ShoppingCart[]
+  cartItems         CartItem[]
+  receipts          Receipt[]
+  
+  @@index([email])
+  @@map("users")
+}
+
+// User Preferences - Préférences utilisateur
+model UserPreference {
+  id                    String   @id @default(cuid())
+  userId                String   @unique @map("user_id")
+  
+  // Préférences de magasins (JSON array of chain IDs)
+  favoriteStores        String[] @default([]) @map("favorite_stores")
+  preferredChains       String[] @default([]) @map("preferred_chains")
+  preferredCity         String?  @map("preferred_city")
+  
+  // Préférences alimentaires
+  dietaryPreferences    String[] @default([]) @map("dietary_preferences") // kosher, vegan, gluten-free, etc.
+  allergens             String[] @default([]) @map("allergens")
+  
+  // Préférences d'affichage
+  currency              String   @default("ILS")
+  language              String   @default("he")
+  darkMode              Boolean  @default(false) @map("dark_mode")
+  
+  // Notifications
+  emailNotifications    Boolean  @default(true) @map("email_notifications")
+  priceAlerts           Boolean  @default(true) @map("price_alerts")
+  promoAlerts           Boolean  @default(true) @map("promo_alerts")
+  
+  createdAt             DateTime @default(now()) @map("created_at")
+  updatedAt             DateTime @updatedAt @map("updated_at")
+  
+  // Relations
+  user                  User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  @@map("user_preferences")
+}
+
+// Shopping Cart - Caddie d'achats
+model ShoppingCart {
+  id                String   @id @default(cuid())
+  userId            String   @map("user_id")
+  name              String   @default("Mon caddie")
+  description       String?
+  isActive          Boolean  @default(true) @map("is_active")
+  isFavorite        Boolean  @default(false) @map("is_favorite")
+  
+  createdAt         DateTime @default(now()) @map("created_at")
+  updatedAt         DateTime @updatedAt @map("updated_at")
+  
+  // Relations
+  user              User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  items             CartItem[]
+  
+  @@index([userId])
+  @@index([isActive])
+  @@map("shopping_carts")
+}
+
+// Cart Items - Articles dans le caddie
+model CartItem {
+  id                String   @id @default(cuid())
+  cartId            String   @map("cart_id")
+  userId            String   @map("user_id")
+  itemCode          String   @map("item_code") // Barcode
+  quantity          Int      @default(1)
+  notes             String?
+  
+  createdAt         DateTime @default(now()) @map("created_at")
+  updatedAt         DateTime @updatedAt @map("updated_at")
+  
+  // Relations
+  cart              ShoppingCart @relation(fields: [cartId], references: [id], onDelete: Cascade)
+  user              User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  product           Product      @relation(fields: [itemCode], references: [itemCode])
+  
+  @@unique([cartId, itemCode])
+  @@index([userId])
+  @@index([itemCode])
+  @@map("cart_items")
+}
+
+// Receipts - Reçus scannés
+model Receipt {
+  id                String   @id @default(cuid())
+  userId            String   @map("user_id")
+  storeName         String?  @map("store_name")
+  storeChainId      String?  @map("store_chain_id")
+  storeId           String?  @map("store_id")
+  receiptDate       DateTime? @map("receipt_date")
+  totalAmount       Decimal?  @map("total_amount") @db.Decimal(10, 2)
+  imageUrl          String?   @map("image_url")
+  
+  createdAt         DateTime @default(now()) @map("created_at")
+  updatedAt         DateTime @updatedAt @map("updated_at")
+  
+  // Relations
+  user              User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  items             ReceiptItem[]
+  
+  @@index([userId])
+  @@index([receiptDate])
+  @@map("receipts")
+}
+
+// Receipt Items - Articles dans un reçu
+model ReceiptItem {
+  id                String   @id @default(cuid())
+  receiptId         String   @map("receipt_id")
+  itemCode          String   @map("item_code") // Barcode
+  itemName          String?  @map("item_name")
+  quantity          Int      @default(1)
+  price             Decimal  @db.Decimal(10, 2)
+  
+  createdAt         DateTime @default(now()) @map("created_at")
+  
+  // Relations
+  receipt           Receipt  @relation(fields: [receiptId], references: [id], onDelete: Cascade)
+  
+  @@index([receiptId])
+  @@index([itemCode])
+  @@map("receipt_items")
+}

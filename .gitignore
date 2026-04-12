@@ -1,0 +1,39 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+
+# Environment variables
+.env
+.env.*
+!.env.example
+
+# Prisma generated client
+prisma/generated/
+
+# Logs
+*.log
+logs/
+startup_out.txt
+startup_err.txt
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
+
+# Uploaded images (user content)
+public/images/products/*
+public/images/stores/*
+!public/images/products/.gitkeep
+!public/images/stores/.gitkeep
+
+# Debug / scratch files
+debug_prices.js
+list-models.js
+test1.json
+test2.json

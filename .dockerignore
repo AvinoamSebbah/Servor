@@ -1,0 +1,10 @@
+node_modules
+dist
+npm-debug.log*
+pnpm-debug.log*
+.git
+.gitignore
+.env
+startup_out.txt
+startup_err.txt
+*.log
