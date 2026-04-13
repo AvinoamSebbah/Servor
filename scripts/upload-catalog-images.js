@@ -20,7 +20,9 @@ cloudinary.config({
   api_secret: process.env.CLOUDINARY_API_SECRET,
 });
 
-const IMAGES_DIR = path.resolve(__dirname, '../../web-frontend/src/assets/generated_images');
+const IMAGES_DIR = process.argv[2]
+  ? path.resolve(process.argv[2])
+  : path.resolve(__dirname, '../../web-frontend/src/assets/generated_images');
 const OUTPUT_FILE = path.resolve(__dirname, '../../web-frontend/src/utils/catalogImageMap.ts');
 const CLOUD_NAME = process.env.CLOUDINARY_CLOUD_NAME;
 
