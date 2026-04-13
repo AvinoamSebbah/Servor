@@ -33,7 +33,12 @@ function buildOgImageUrl(productIds: string[]): string {
     parts.push(`l_${overlayIds[0]}/c_fill,w_440,h_440,r_30/fl_layer_apply,g_center`);
   }
 
-  parts.push('f_auto,q_85');
+  // Agali logo + text "agali" right-aligned, bottom-right corner
+  // Use Arial which is always available on Cloudinary
+  parts.push(`l_agali:logo/c_fit,w_90,h_90/fl_layer_apply,g_south_east,x_240,y_36`);
+  parts.push(`l_text:Arial_68_bold:agali/co_rgb:ffffff/fl_layer_apply,g_south_east,x_40,y_40`);
+
+  parts.push('f_jpg,q_85');
 
   return `${base}/${parts.join('/')}/catalog/${bgId}`;
 }
@@ -64,7 +69,9 @@ router.get('/:code', async (req: Request, res: Response) => {
     }
 
     const { name, items } = rows[0];
-    const itemsArr: Array<{ productId?: string }> = Array.isArray(items) ? items as Array<{ productId?: string }> : [];
+    // items may come as already-parsed object or as string from Prisma JSONB
+    const rawItems = typeof items === 'string' ? JSON.parse(items) : items;
+    const itemsArr: Array<{ productId?: string }> = Array.isArray(rawItems) ? rawItems : [];
     const count = itemsArr.length;
     const productIds = itemsArr.slice(0, 4).map((i) => i.productId ?? '').filter(Boolean);
 
@@ -91,6 +98,7 @@ router.get('/:code', async (req: Request, res: Response) => {
   <meta property="og:title" content="${title}" />
   <meta property="og:description" content="${description}" />
   <meta property="og:image" content="${safeImage}" />
+  <meta property="og:image:type" content="image/jpeg" />
   <meta property="og:image:width" content="1200" />
   <meta property="og:image:height" content="630" />
   <meta property="og:url" content="${safeRedirect}" />
