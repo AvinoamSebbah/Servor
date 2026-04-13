@@ -11,6 +11,7 @@ import storesRouter from './routes/stores';
 import compareRouter from './routes/compare';
 import scanRouter from './routes/scan';
 import offersRouter from './routes/offers';
+import shoppingListsRouter from './routes/shoppingLists';
 
 dotenv.config();
 
@@ -62,6 +63,7 @@ app.use('/api/stores', storesRouter);
 app.use('/api/compare', compareRouter);
 app.use('/api/scan', scanRouter);
 app.use('/api/offers', offersRouter);
+app.use('/api/lists', shoppingListsRouter);
 app.use('/api/auth', authRouter);
 app.use('/api/user', userRouter);
 
