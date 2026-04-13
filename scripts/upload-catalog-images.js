@@ -30,10 +30,10 @@ async function uploadFile(filePath, publicId) {
   const result = await cloudinary.uploader.upload(filePath, {
     public_id: publicId,
     folder: 'catalog',
-    overwrite: false,         // ne ré-upload pas si déjà présent
+    overwrite: true,
     resource_type: 'image',
   });
-  return result.public_id; // e.g. "catalog/p_01_01_001"
+  return result.public_id;
 }
 
 function buildUrl(publicId) {
@@ -51,44 +51,24 @@ async function main() {
     const filePath = path.join(IMAGES_DIR, file);
 
     try {
-      // Check if already uploaded to avoid unnecessary API calls
       let publicId;
       try {
         const existing = await cloudinary.api.resource(`catalog/${id}`);
         publicId = existing.public_id;
-        console.log(`  ✓ Already uploaded: ${id}`);
+        console.log(`  ✓ Already on Cloudinary: ${id}`);
       } catch (checkErr) {
-        // 404 = not found → upload; anything else = rethrow
         if (checkErr && checkErr.http_code && checkErr.http_code !== 404) throw checkErr;
         publicId = await uploadFile(filePath, id);
         console.log(`  ↑ Uploaded: ${id}`);
       }
-      map[id] = buildUrl(publicId);
+      map[id] = publicId;
     } catch (err) {
       console.error(`  ✗ Failed: ${id}`, err && (err.message || JSON.stringify(err)));
     }
   }
 
-  // Generate TypeScript file
-  const entries = Object.entries(map)
-    .map(([k, v]) => `  '${k}': '${v}',`)
-    .join('\n');
-
-  const tsContent = `// AUTO-GENERATED — run web-backend/scripts/upload-catalog-images.js to regenerate
-// Images catalogue hébergées sur Cloudinary, générées depuis src/assets/generated_images/
-export const CATALOG_IMAGE_MAP: Record<string, string> = {
-${entries}
-};
-
-const CLOUD_NAME = '${CLOUD_NAME}';
-
-export function getCatalogImageUrl(id: string): string | null {
-  return CATALOG_IMAGE_MAP[id] ?? null;
-}
-`;
-
-  fs.writeFileSync(OUTPUT_FILE, tsContent, 'utf-8');
-  console.log(`\n✅ catalogImageMap.ts written with ${Object.keys(map).length} entries`);
+  console.log(`\n✅ Done — ${Object.keys(map).length}/${files.length} images on Cloudinary`);
+  console.log(`   URLs are generated automatically via getCatalogImageUrl(id) — no map file needed.`);
 }
 
 main().catch(err => { console.error(err); process.exit(1); });
