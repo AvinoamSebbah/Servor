@@ -6,33 +6,36 @@ const prisma = new PrismaClient();
 
 const CLOUD_NAME = 'dprve5nst';
 
-// Build a Cloudinary OG image URL from product IDs (1 image = full-width, 4 = 2x2 grid)
+// Build a dynamic OG image: first product blurred as background, products overlaid neatly
 function buildOgImageUrl(productIds: string[]): string {
   const base = `https://res.cloudinary.com/${CLOUD_NAME}/image/upload`;
-  const ids = productIds.filter(Boolean).slice(0, 4);
+  const ids = productIds.filter(Boolean);
+  const bgId = ids[0] || 'p_01_01_001';
+  const overlayIds = ids.slice(0, 3).map((id) => `catalog:${id}`);
 
-  if (ids.length === 0) {
-    return `${base}/c_fill,w_1200,h_630,g_auto/f_auto,q_80/catalog/p_01_01_001`;
+  // Start with: resize to 1200×630, heavily blur + darken the background
+  const parts: string[] = [
+    'c_fill,w_1200,h_630,g_center',
+    'e_blur:700,e_brightness:-65',
+  ];
+
+  // Overlay the product images on top, nicely centered
+  if (overlayIds.length >= 3) {
+    // 3 products: smaller side ones, bigger center
+    parts.push(`l_${overlayIds[0]}/c_fill,w_270,h_270,r_20/fl_layer_apply,g_center,x_-315,y_-20`);
+    parts.push(`l_${overlayIds[1]}/c_fill,w_340,h_340,r_26/fl_layer_apply,g_center,y_20`);
+    parts.push(`l_${overlayIds[2]}/c_fill,w_270,h_270,r_20/fl_layer_apply,g_center,x_315,y_-20`);
+  } else if (overlayIds.length === 2) {
+    parts.push(`l_${overlayIds[0]}/c_fill,w_310,h_310,r_22/fl_layer_apply,g_center,x_-185`);
+    parts.push(`l_${overlayIds[1]}/c_fill,w_310,h_310,r_22/fl_layer_apply,g_center,x_185`);
+  } else {
+    // Single product: large, centered
+    parts.push(`l_${overlayIds[0]}/c_fill,w_440,h_440,r_30/fl_layer_apply,g_center`);
   }
 
-  if (ids.length < 4) {
-    return `${base}/c_fill,w_1200,h_630,g_auto/f_auto,q_80/catalog/${ids[0]}`;
-  }
+  parts.push('f_auto,q_85');
 
-  // 4-image 2×2 grid: each quadrant 600×315
-  // In Cloudinary layer refs, folder '/' → ':'
-  const safe = ids.map((id) => `catalog:${id}`);
-
-  return [
-    base,
-    `c_fill,w_1200,h_630,b_rgb:0f172a`,
-    `l_${safe[0]}/c_fill,w_600,h_315,fl_layer_apply,g_north_west`,
-    `l_${safe[1]}/c_fill,w_600,h_315,fl_layer_apply,g_north_east`,
-    `l_${safe[2]}/c_fill,w_600,h_315,fl_layer_apply,g_south_west`,
-    `l_${safe[3]}/c_fill,w_600,h_315,fl_layer_apply,g_south_east`,
-    `f_auto,q_80`,
-    `catalog/${ids[0]}`,
-  ].join('/');
+  return `${base}/${parts.join('/')}/catalog/${bgId}`;
 }
 
 // Escape HTML entities to prevent injection in the OG HTML page
@@ -47,7 +50,7 @@ function esc(str: string): string {
 // GET /share/:code — returns an HTML page with OG meta tags then redirects to the frontend
 router.get('/:code', async (req: Request, res: Response) => {
   const { code } = req.params;
-  const FRONTEND_URL = process.env.FRONTEND_URL || 'https://agali-app.vercel.app';
+  const FRONTEND_URL = process.env.FRONTEND_URL || 'https://agali.live';
   const redirectTarget = `${FRONTEND_URL}/shopping-list/run/${code.toUpperCase()}`;
 
   try {
