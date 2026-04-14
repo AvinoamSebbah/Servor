@@ -62,10 +62,16 @@ router.post('/', async (req: Request, res: Response) => {
 
     const code = await generateUniqueCode();
 
-    const result = await prisma.$queryRawUnsafe<{ id: string; code: string; name: string }[]>(
+    const result = await prisma.$queryRawUnsafe<{
+      id: string;
+      code: string;
+      name: string;
+      items: unknown;
+      updated_at: string;
+    }[]>(
       `INSERT INTO shopping_lists (code, name, items)
        VALUES ($1, $2, $3::jsonb)
-       RETURNING id, code, name`,
+       RETURNING id, code, name, items, updated_at`,
       code,
       name,
       JSON.stringify(items)
