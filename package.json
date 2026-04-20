@@ -38,6 +38,7 @@
     "openai": "^6.15.0",
     "passport": "^0.7.0",
     "passport-local": "^1.0.0",
+    "pg": "^8.20.0",
     "prisma": "^5.22.0",
     "react-feather": "^2.0.10",
     "typescript": "^5.9.3"

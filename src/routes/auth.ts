@@ -69,6 +69,24 @@ function safeUser(user: any) {
   return safe;
 }
 
+// ── GET /api/auth/check-user?email=... ───────────────────────────────────────
+// Returns { exists: true/false } — used by frontend to adapt UX (no PW strength bar for existing users)
+
+router.get('/check-user', async (req: Request, res: Response) => {
+  try {
+    const raw = (req.query.email as string) || '';
+    if (!raw) return res.json({ exists: false });
+    const cleanEmail = sanitizeEmail(raw);
+    const rows = await prisma.$queryRawUnsafe<any[]>(
+      'SELECT id FROM users WHERE email = $1',
+      cleanEmail
+    );
+    return res.json({ exists: rows.length > 0 });
+  } catch {
+    return res.json({ exists: false });
+  }
+});
+
 // ── POST /api/auth/signup ─────────────────────────────────────────────────────
 
 router.post('/signup', async (req: Request, res: Response) => {
@@ -268,6 +286,46 @@ router.put('/profile', async (req: Request, res: Response) => {
   }
 });
 
+// ── PUT /api/auth/preferences ─────────────────────────────────────────────────
+// Saves user preferences (city, theme, language, etc.) as JSONB
+
+router.put('/preferences', async (req: Request, res: Response) => {
+  try {
+    const authHeader = req.headers.authorization;
+    const token = authHeader?.replace('Bearer ', '').trim();
+    if (!token) return res.status(401).json({ error: 'Unauthorized' });
+
+    const user = await getUserByToken(token);
+    if (!user) return res.status(401).json({ error: 'Invalid or expired session' });
+
+    const { city, theme, language, ...rest } = req.body;
+    const current = user.preferences || {};
+    const merged = { ...current, ...rest };
+    if (city !== undefined) merged.city = city;
+    if (theme !== undefined) merged.theme = theme;
+    if (language !== undefined) merged.language = language;
+
+    // Also update city column directly if provided
+    if (city !== undefined) {
+      await prisma.$executeRawUnsafe(
+        `UPDATE users SET city = $1, preferences = $2::jsonb, updated_at = NOW() WHERE id = $3`,
+        city, JSON.stringify(merged), user.id
+      );
+    } else {
+      await prisma.$executeRawUnsafe(
+        `UPDATE users SET preferences = $1::jsonb, updated_at = NOW() WHERE id = $2`,
+        JSON.stringify(merged), user.id
+      );
+    }
+
+    const updated = await prisma.$queryRawUnsafe<any[]>('SELECT * FROM users WHERE id = $1', user.id);
+    return res.json({ user: safeUser(updated[0]) });
+  } catch (error) {
+    console.error('Preferences update error:', error);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 // ── POST /api/auth/change-password ───────────────────────────────────────────
 
 router.post('/change-password', async (req: Request, res: Response) => {
@@ -358,6 +416,202 @@ router.get('/cart', async (req: Request, res: Response) => {
     return res.json({ cart: rows[0]?.items || [], savedAt: rows[0]?.saved_at || null });
   } catch (error) {
     console.error('Cart fetch error:', error);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// ── Subscription helpers ──────────────────────────────────────────────────────
+
+const PLAN_PRICES: Record<string, number> = { free: 0, pro: 9.90, max: 19.90 };
+const PLAN_ORDER: Record<string, number> = { free: 0, pro: 1, max: 2 };
+
+// ── GET /api/auth/subscription ────────────────────────────────────────────────
+
+router.get('/subscription', async (req: Request, res: Response) => {
+  try {
+    const authHeader = req.headers.authorization;
+    const token = authHeader?.replace('Bearer ', '').trim();
+    if (!token) return res.status(401).json({ error: 'Unauthorized' });
+
+    const user = await getUserByToken(token);
+    if (!user) return res.status(401).json({ error: 'Invalid or expired session' });
+
+    return res.json({
+      plan: user.plan,
+      status: user.subscription_status || 'free',
+      startedAt: user.subscription_started_at || null,
+      currentPeriodEnd: user.subscription_current_period_end || null,
+      cancelledAt: user.subscription_cancelled_at || null,
+      lastPrice: user.subscription_last_price || null,
+      invoiceCount: user.subscription_invoice_count || 0,
+    });
+  } catch (error) {
+    console.error('Subscription fetch error:', error);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// ── POST /api/auth/subscription/upgrade ──────────────────────────────────────
+
+router.post('/subscription/upgrade', async (req: Request, res: Response) => {
+  try {
+    const authHeader = req.headers.authorization;
+    const token = authHeader?.replace('Bearer ', '').trim();
+    if (!token) return res.status(401).json({ error: 'Unauthorized' });
+
+    const user = await getUserByToken(token);
+    if (!user) return res.status(401).json({ error: 'Invalid or expired session' });
+
+    const { plan } = req.body;
+    if (!plan || !['pro', 'max'].includes(plan)) {
+      return res.status(400).json({ error: 'Invalid plan. Choose pro or max.' });
+    }
+
+    const currentPlan = user.plan || 'free';
+    const currentOrder = PLAN_ORDER[currentPlan] ?? 0;
+    const newOrder = PLAN_ORDER[plan] ?? 0;
+
+    if (newOrder <= currentOrder && user.subscription_status === 'active') {
+      return res.status(400).json({ error: 'Cannot downgrade via this endpoint.' });
+    }
+
+    const now = new Date();
+    const newPrice = PLAN_PRICES[plan];
+    let prorataCredit = 0;
+
+    // Calculate prorata credit if upgrading from active paid plan
+    if (
+      currentPlan !== 'free' &&
+      user.subscription_status === 'active' &&
+      user.subscription_current_period_end &&
+      newOrder > currentOrder
+    ) {
+      const periodEnd = new Date(user.subscription_current_period_end);
+      const totalMs = 30 * 24 * 60 * 60 * 1000; // 30-day billing cycle
+      const remainingMs = Math.max(0, periodEnd.getTime() - now.getTime());
+      const oldPrice = PLAN_PRICES[currentPlan] || 0;
+      prorataCredit = parseFloat(((remainingMs / totalMs) * oldPrice).toFixed(2));
+    }
+
+    const chargedAmount = Math.max(0, newPrice - prorataCredit);
+
+    // New period: 30 days from today
+    const periodEnd = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000);
+    const invoiceCount = (user.subscription_invoice_count || 0) + 1;
+
+    await prisma.$executeRawUnsafe(
+      `UPDATE users SET
+        plan = $1,
+        subscription_status = 'active',
+        subscription_started_at = COALESCE(subscription_started_at, $2),
+        subscription_current_period_end = $3,
+        subscription_cancelled_at = NULL,
+        subscription_last_price = $4,
+        subscription_invoice_count = $5,
+        updated_at = NOW()
+       WHERE id = $6`,
+      plan, now, periodEnd, chargedAmount, invoiceCount, user.id
+    );
+
+    const updated = await prisma.$queryRawUnsafe<any[]>('SELECT * FROM users WHERE id = $1', user.id);
+    return res.json({
+      success: true,
+      charged: chargedAmount,
+      prorataCredit,
+      user: safeUser(updated[0]),
+      subscription: {
+        plan,
+        status: 'active',
+        startedAt: updated[0].subscription_started_at,
+        currentPeriodEnd: updated[0].subscription_current_period_end,
+        lastPrice: chargedAmount,
+        invoiceCount,
+      }
+    });
+  } catch (error) {
+    console.error('Subscription upgrade error:', error);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// ── POST /api/auth/subscription/cancel ───────────────────────────────────────
+
+router.post('/subscription/cancel', async (req: Request, res: Response) => {
+  try {
+    const authHeader = req.headers.authorization;
+    const token = authHeader?.replace('Bearer ', '').trim();
+    if (!token) return res.status(401).json({ error: 'Unauthorized' });
+
+    const user = await getUserByToken(token);
+    if (!user) return res.status(401).json({ error: 'Invalid or expired session' });
+
+    if (user.plan === 'free' || user.subscription_status === 'cancelled') {
+      return res.status(400).json({ error: 'No active subscription to cancel.' });
+    }
+
+    const now = new Date();
+    // Mark as cancelled — keeps access until period end
+    await prisma.$executeRawUnsafe(
+      `UPDATE users SET
+        subscription_status = 'cancelled',
+        subscription_cancelled_at = $1,
+        updated_at = NOW()
+       WHERE id = $2`,
+      now, user.id
+    );
+
+    const updated = await prisma.$queryRawUnsafe<any[]>('SELECT * FROM users WHERE id = $1', user.id);
+    return res.json({
+      success: true,
+      message: 'Subscription cancelled. Access remains until period end.',
+      currentPeriodEnd: updated[0].subscription_current_period_end,
+      user: safeUser(updated[0]),
+    });
+  } catch (error) {
+    console.error('Subscription cancel error:', error);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// ── POST /api/auth/subscription/renew ────────────────────────────────────────
+
+router.post('/subscription/renew', async (req: Request, res: Response) => {
+  try {
+    const authHeader = req.headers.authorization;
+    const token = authHeader?.replace('Bearer ', '').trim();
+    if (!token) return res.status(401).json({ error: 'Unauthorized' });
+
+    const user = await getUserByToken(token);
+    if (!user) return res.status(401).json({ error: 'Invalid or expired session' });
+
+    if (user.plan === 'free' || user.subscription_status !== 'cancelled') {
+      return res.status(400).json({ error: 'No cancelled subscription to renew.' });
+    }
+
+    const now = new Date();
+    // Only allow renew if the period hasn't ended yet
+    if (user.subscription_current_period_end && new Date(user.subscription_current_period_end) < now) {
+      return res.status(400).json({ error: 'Subscription has already expired.' });
+    }
+
+    // Revert cancelled state
+    await prisma.$executeRawUnsafe(
+      `UPDATE users SET
+        subscription_status = 'active',
+        subscription_cancelled_at = NULL,
+        updated_at = NOW()
+       WHERE id = $1`,
+      user.id
+    );
+
+    const updated = await prisma.$queryRawUnsafe<any[]>('SELECT * FROM users WHERE id = $1', user.id);
+    return res.json({
+      success: true,
+      message: 'Subscription renewed successfully.',
+      user: safeUser(updated[0]),
+    });
+  } catch (error) {
+    console.error('Subscription renew error:', error);
     return res.status(500).json({ error: 'Internal server error' });
   }
 });
