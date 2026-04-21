@@ -272,6 +272,7 @@ router.get('/by-item-code', async (req, res) => {
     const itemCode = typeof req.query.itemCode === 'string' ? req.query.itemCode.trim() : '';
     const city = typeof req.query.city === 'string' ? req.query.city.trim() : '';
     const chainId = typeof req.query.chainId === 'string' ? req.query.chainId.trim() : '';
+    const chainName = typeof req.query.chainName === 'string' ? req.query.chainName.trim() : '';
     const limit = parseLimit(req.query.limit, 100, 300);
     const offset = parseOffset(req.query.offset, 0);
 
@@ -301,7 +302,8 @@ router.get('/by-item-code', async (req, res) => {
         ${city || null}::text,
         ${chainId || null}::text,
         ${limit}::integer,
-        ${offset}::integer
+        ${offset}::integer,
+        ${chainName || null}::text
       )
       ORDER BY effective_price ASC NULLS LAST, updated_at DESC NULLS LAST, store_id ASC
     `);
@@ -340,6 +342,7 @@ router.get('/by-search', async (req, res) => {
     const query = typeof req.query.q === 'string' ? req.query.q.trim() : '';
     const city = typeof req.query.city === 'string' ? req.query.city.trim() : '';
     const chainId = typeof req.query.chainId === 'string' ? req.query.chainId.trim() : '';
+    const chainName = typeof req.query.chainName === 'string' ? req.query.chainName.trim() : '';
     const limitProducts = parseLimit(req.query.limitProducts, 10, 100);
     const offsetProducts = parseOffset(req.query.offsetProducts, 0);
 
@@ -372,7 +375,8 @@ router.get('/by-search', async (req, res) => {
         ${city || null}::text,
         ${chainId || null}::text,
         ${limitProducts}::integer,
-        ${offsetProducts}::integer
+        ${offsetProducts}::integer,
+        ${chainName || null}::text
       )
       ORDER BY product_rank DESC NULLS LAST, effective_price ASC NULLS LAST, updated_at DESC NULLS LAST, item_code ASC, store_id ASC
     `);
@@ -440,6 +444,7 @@ router.get('/by-item-codes', async (req, res) => {
     const itemCodes = parseItemCodes(req.query.itemCodes);
     const city = typeof req.query.city === 'string' ? req.query.city.trim() : '';
     const chainId = typeof req.query.chainId === 'string' ? req.query.chainId.trim() : '';
+    const chainName = typeof req.query.chainName === 'string' ? req.query.chainName.trim() : '';
     const limitPerItem = parseLimit(req.query.limitPerItem, 200, 500);
 
     if (itemCodes.length === 0) {
@@ -472,7 +477,8 @@ router.get('/by-item-codes', async (req, res) => {
         ${city || null}::text,
         ${chainId || null}::text,
         ${limitPerItem}::integer,
-        0::integer
+        0::integer,
+        ${chainName || null}::text
       ) o
       ORDER BY o.item_code ASC, o.effective_price ASC NULLS LAST, o.updated_at DESC NULLS LAST, o.store_id ASC
     `);
@@ -513,6 +519,7 @@ router.get('/top-promotions', async (req, res) => {
   try {
     const city = typeof req.query.city === 'string' ? req.query.city.trim() : '';
     const chainId = typeof req.query.chainId === 'string' ? req.query.chainId.trim() : '';
+    const chainName = typeof req.query.chainName === 'string' ? req.query.chainName.trim() : '';
     const storeId = typeof req.query.storeId === 'string' ? req.query.storeId.trim() : '';
     const includeConditionalPromos = parseBooleanQuery(req.query.includeConditional, false);
     const windowHours = parseWindowHours(req.query.windowHours, 24, 720);
@@ -559,7 +566,8 @@ router.get('/top-promotions', async (req, res) => {
         ${windowHours}::integer,
         ${batchLimit}::integer,
         ${batchOffset}::integer,
-        ${sortBy}::text
+        ${sortBy}::text,
+        ${chainName || null}::text
       )
     `);
 
