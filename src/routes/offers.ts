@@ -73,6 +73,12 @@ type RawTopPromotionRow = {
   smart_score: unknown;
   promotion_end_date: Date | string | null;
   updated_at: Date | string | null;
+  has_image: boolean | null;
+  promotion_id: string | null;
+  promotion_description: string | null;
+  promo_kind: string | null;
+  promo_label: string | null;
+  is_conditional_promo: unknown;
 };
 
 type ChainFilterRow = {
@@ -113,13 +119,56 @@ type TopPromotionDto = {
   promoLabel: string | null;
   isConditionalPromo: boolean;
   updatedAt: string | null;
+  hasImage: boolean | null;
 };
 
 const DELIVERY_KEYWORD = 'משלוח';
 const BARCODE_ITEM_CODE_REGEX = /^[0-9]{8,14}$/;
-const PROMOTIONS_SCAN_BATCH_LIMIT = 100;
-const PROMOTIONS_MAX_SCANNED_ROWS = 1000;
+
+// Alcohol/tobacco blocklist — belt-and-suspenders fallback on top of SQL blacklist.
+// Uses negative lookbehind/lookahead (?<![א-ת]) to avoid matching inside longer Hebrew words
+// e.g. /יין/ would wrongly match מצויין (excellent), /בירה/ would match שבירה (breakage), etc.
+const HB = '[א-ת]'; // Hebrew letter class (used inline in RegExp constructor)
+function hw(word: string) {
+  // Match word only when NOT preceded or followed by another Hebrew letter
+  return new RegExp(`(?<!${HB})${word}(?!${HB})`);
+}
+const ALCOHOL_BLOCKLIST_PATTERNS: RegExp[] = [
+  hw('וויסקי'), hw('ויסקי'), hw('ווסקי'), hw('וודקה'),
+  hw('יין'), hw('יינות'), hw('ערק'), hw('בירה'),
+  hw('רום'), hw('ברנדי'), hw('קוניאק'), hw('שמפניה'), hw('ליקר'),
+  hw('שיבאס'), hw('גלנליווט'), /גים בים/,
+  /ט\.קוארבו/, hw('אוזו'), hw('פלומרי'),
+  hw('סיגריות'), hw('טבק'), /\bסיגר\b/, hw('אלכוהול'),
+  /whisky/i, /whiskey/i, /(?<![a-z])wine(?![a-z])/i, /(?<![a-z])beer(?![a-z])/i,
+  /vodka/i, /tequila/i, /(?<![a-z])rum(?![a-z])/i, /bourbon/i,
+  /scotch/i, /champagne/i, /liqueur/i, /liquor/i, /cognac/i, /brandy/i,
+  /cigarette/i, /tobacco/i, /(?<![a-z])cigar(?![a-z])/i,
+];
+const PROMOTIONS_SCAN_BATCH_LIMIT = 200;
+const PROMOTIONS_MAX_SCANNED_ROWS = 2000;
 let topPromotionsPrewarmPromise: Promise<void> | null = null;
+
+// In-memory cache for chain/store filter data (stable, changes only when scrapor runs)
+const FILTER_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+type FilterCacheEntry<T> = { data: T; expiresAt: number };
+const chainFilterCache = new Map<string, FilterCacheEntry<ChainFilterRow[]>>();
+const storeFilterCache = new Map<string, FilterCacheEntry<StoreFilterRow[]>>();
+
+function getCachedChains(key: string): ChainFilterRow[] | null {
+  const entry = chainFilterCache.get(key);
+  return entry && entry.expiresAt > Date.now() ? entry.data : null;
+}
+function setCachedChains(key: string, data: ChainFilterRow[]): void {
+  chainFilterCache.set(key, { data, expiresAt: Date.now() + FILTER_CACHE_TTL_MS });
+}
+function getCachedStores(key: string): StoreFilterRow[] | null {
+  const entry = storeFilterCache.get(key);
+  return entry && entry.expiresAt > Date.now() ? entry.data : null;
+}
+function setCachedStores(key: string, data: StoreFilterRow[]): void {
+  storeFilterCache.set(key, { data, expiresAt: Date.now() + FILTER_CACHE_TTL_MS });
+}
 
 function ensureTopPromotionsCachePrewarm(windowHours = 24, topN = 200): Promise<void> {
   if (!topPromotionsPrewarmPromise) {
@@ -136,7 +185,9 @@ function ensureTopPromotionsCachePrewarm(windowHours = 24, topN = 200): Promise<
   return topPromotionsPrewarmPromise;
 }
 
-void ensureTopPromotionsCachePrewarm();
+// Startup prewarm disabled — cache is populated by nightly scrapor refresh.
+// On-demand prewarm (cold-start fallback) still active in the route handler.
+// void ensureTopPromotionsCachePrewarm();
 
 function mapTopPromotionRow(row: RawTopPromotionRow): TopPromotionDto {
   return {
@@ -160,12 +211,13 @@ function mapTopPromotionRow(row: RawTopPromotionRow): TopPromotionDto {
     promotionEndDate: row.promotion_end_date
       ? new Date(row.promotion_end_date).toISOString().slice(0, 10)
       : null,
-    promotionId: null,
-    promotionDescription: null,
-    promoKind: null,
-    promoLabel: null,
-    isConditionalPromo: false,
+    promotionId: row.promotion_id || null,
+    promotionDescription: row.promotion_description || null,
+    promoKind: row.promo_kind || 'regular',
+    promoLabel: row.promo_label || 'מבצע',
+    isConditionalPromo: Boolean(row.is_conditional_promo),
     updatedAt: row.updated_at ? new Date(row.updated_at).toISOString() : null,
+    hasImage: row.has_image === null || row.has_image === undefined ? null : Boolean(row.has_image),
   };
 }
 
@@ -175,6 +227,11 @@ function isValidTopPromotion(promo: TopPromotionDto): boolean {
 
   const itemName = (promo.itemName || '').trim();
   if (!itemName || itemName.includes(DELIVERY_KEYWORD)) return false;
+
+  // Block alcohol/tobacco regardless of SQL cache state
+  for (const pattern of ALCOHOL_BLOCKLIST_PATTERNS) {
+    if (pattern.test(itemName)) return false;
+  }
 
   const basePrice = promo.price;
   const effectivePrice = promo.effectivePrice ?? promo.promoPrice;
@@ -458,10 +515,11 @@ router.get('/top-promotions', async (req, res) => {
     const chainId = typeof req.query.chainId === 'string' ? req.query.chainId.trim() : '';
     const storeId = typeof req.query.storeId === 'string' ? req.query.storeId.trim() : '';
     const includeConditionalPromos = parseBooleanQuery(req.query.includeConditional, false);
-    const windowHours = parseWindowHours(req.query.windowHours, 24, 168);
-    const limit = parseLimit(req.query.limit, 50, 50);
+    const windowHours = parseWindowHours(req.query.windowHours, 24, 720);
+    const limit = parseLimit(req.query.limit, 50, 100);
     const offset = parseOffset(req.query.offset, 0);
-    const sortBy = typeof req.query.sortBy === 'string' && ['percent', 'savings'].includes(req.query.sortBy) ? req.query.sortBy : 'score';
+    const isFirstPage = offset === 0;
+    const sortBy = typeof req.query.sortBy === 'string' && ['percent', 'savings', 'score'].includes(req.query.sortBy) ? req.query.sortBy : 'score';
 
     if (!city) {
       return res.status(400).json({ error: 'city is required' });
@@ -487,7 +545,13 @@ router.get('/top-promotions', async (req, res) => {
         discount_percent,
         smart_score,
         promotion_end_date,
-        updated_at
+        updated_at,
+        promotion_id,
+        promotion_description,
+        promo_kind,
+        promo_label,
+        is_conditional_promo,
+        has_image
       FROM public.get_top_city_promotions(
         ${city}::text,
         ${chainId || null}::text,
@@ -507,9 +571,13 @@ router.get('/top-promotions', async (req, res) => {
     let scannedRows = 0;
     let sourceExhausted = false;
     let cacheWarmupDone = false;
+    // Start with a small batch (2× what we need) to minimise first-page latency.
+    // Grow to full batch size on subsequent iterations.
+    let currentBatchSize = Math.min(targetCount * 2, PROMOTIONS_SCAN_BATCH_LIMIT);
 
     while (collected.length < targetCount && scannedRows < PROMOTIONS_MAX_SCANNED_ROWS) {
-      let rows = await fetchTopPromotionsRows(PROMOTIONS_SCAN_BATCH_LIMIT, scanOffset);
+      let rows = await fetchTopPromotionsRows(currentBatchSize, scanOffset);
+      currentBatchSize = PROMOTIONS_SCAN_BATCH_LIMIT; // expand from 2nd iteration
 
       // Cold-start safeguard: warm the SQL cache once and retry from the first page.
       if (rows.length === 0 && !cacheWarmupDone && scanOffset === 0) {
@@ -528,31 +596,9 @@ router.get('/top-promotions', async (req, res) => {
       scanOffset += rows.length;
       scannedRows += rows.length;
 
-      const mappedRows = rows.map(mapTopPromotionRow);
-      const contextMap = await resolvePromoContexts(
-        prisma,
-        mappedRows.map((promo) => ({
-          itemCode: promo.itemCode,
-          chainId: promo.chainId,
-          storeId: promo.storeId,
-          promoPrice: promo.promoPrice,
-        })),
-      );
-
-      const enrichedRows = mappedRows.map((promo) => {
-        const key = buildPromoLookupKey(promo.itemCode, promo.chainId, promo.storeId);
-        const context = contextMap.get(key);
-        return {
-          ...promo,
-          promotionId: context?.promotionId ?? null,
-          promotionDescription: context?.promotionDescription ?? null,
-          promoKind: context?.promoKind ?? (promo.promoPrice !== null ? 'regular' : null),
-          promoLabel: context?.promoLabel ?? (promo.promoPrice !== null ? 'מבצע' : null),
-          isConditionalPromo: context?.isConditionalPromo ?? false,
-        };
-      });
-
-      for (const promo of enrichedRows) {
+      // Context (promotionId, promoKind, isConditionalPromo) is now embedded in the cache row —
+      // no extra resolvePromoContexts SQL round-trip needed.
+      for (const promo of rows.map(mapTopPromotionRow)) {
         if (!isValidTopPromotion(promo)) continue;
         if (!includeConditionalPromos && promo.isConditionalPromo) continue;
 
@@ -565,8 +611,6 @@ router.get('/top-promotions', async (req, res) => {
 
         if (collected.length >= targetCount) break;
       }
-
-      // Do not infer exhaustion from a short page; SQL function can enforce its own max page size.
     }
 
     timingsMs.promotionsSql = elapsedMs(tPromotionsSql);
@@ -579,30 +623,53 @@ router.get('/top-promotions', async (req, res) => {
     timingsMs.mapping = elapsedMs(tMap);
 
     const tFiltersSql = process.hrtime.bigint();
-    const [chainRows, storeRows] = await Promise.all([
-      prisma.$queryRaw<ChainFilterRow[]>(Prisma.sql`
-        SELECT DISTINCT
-          s.chain_id,
-          COALESCE(NULLIF(s.chain_name, ''), s.chain_id)::text AS chain_name
-        FROM stores s
-        WHERE s.city ILIKE ${city}::text || '%'
-        ORDER BY chain_name ASC
-        LIMIT 100
-      `),
-      prisma.$queryRaw<StoreFilterRow[]>(Prisma.sql`
-        SELECT
-          s.chain_id,
-          COALESCE(NULLIF(s.chain_name, ''), s.chain_id)::text AS chain_name,
-          s.store_id,
-          COALESCE(NULLIF(s.store_name, ''), s.store_id)::text AS store_name,
-          s.city::text AS city
-        FROM stores s
-        WHERE s.city ILIKE ${city}::text || '%'
-          AND (${chainId || null}::text IS NULL OR s.chain_id = ${chainId || null}::text)
-        ORDER BY chain_name ASC, store_name ASC
-        LIMIT 500
-      `),
-    ]);
+    // Filter queries are only needed on first page — subsequent pages already have them cached client-side.
+    // Results are also cached in memory for 5 minutes to avoid repeated DB round trips.
+    let chainRows: ChainFilterRow[] = [];
+    let storeRows: StoreFilterRow[] = [];
+    if (isFirstPage) {
+      const chainCacheKey = city.toLowerCase();
+      const storeCacheKey = `${city.toLowerCase()}::${chainId ?? ''}`;
+
+      const cachedChains = getCachedChains(chainCacheKey);
+      const cachedStores = getCachedStores(storeCacheKey);
+
+      if (cachedChains && cachedStores) {
+        chainRows = cachedChains;
+        storeRows = cachedStores;
+      } else {
+        [chainRows, storeRows] = await Promise.all([
+          cachedChains
+            ? Promise.resolve(cachedChains)
+            : prisma.$queryRaw<ChainFilterRow[]>(Prisma.sql`
+                SELECT DISTINCT
+                  s.chain_id,
+                  COALESCE(NULLIF(s.chain_name, ''), s.chain_id)::text AS chain_name
+                FROM stores s
+                WHERE s.city ILIKE ${city}::text || '%'
+                ORDER BY chain_name ASC
+                LIMIT 100
+              `),
+          cachedStores
+            ? Promise.resolve(cachedStores)
+            : prisma.$queryRaw<StoreFilterRow[]>(Prisma.sql`
+                SELECT
+                  s.chain_id,
+                  COALESCE(NULLIF(s.chain_name, ''), s.chain_id)::text AS chain_name,
+                  s.store_id,
+                  COALESCE(NULLIF(s.store_name, ''), s.store_id)::text AS store_name,
+                  s.city::text AS city
+                FROM stores s
+                WHERE s.city ILIKE ${city}::text || '%'
+                  AND (${chainId || null}::text IS NULL OR s.chain_id = ${chainId || null}::text)
+                ORDER BY chain_name ASC, store_name ASC
+                LIMIT 500
+              `),
+        ]);
+        if (!cachedChains) setCachedChains(chainCacheKey, chainRows);
+        if (!cachedStores) setCachedStores(storeCacheKey, storeRows);
+      }
+    }
     const filtersElapsed = elapsedMs(tFiltersSql);
     timingsMs.chainsSql = filtersElapsed;
     timingsMs.storesSql = filtersElapsed;
@@ -1048,4 +1115,4 @@ router.get('/store-promos-meta', async (req, res) => {
   }
 });
 
-export default router;
+export default router;
