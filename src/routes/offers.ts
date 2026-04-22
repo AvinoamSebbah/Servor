@@ -145,8 +145,7 @@ const ALCOHOL_BLOCKLIST_PATTERNS: RegExp[] = [
   /scotch/i, /champagne/i, /liqueur/i, /liquor/i, /cognac/i, /brandy/i,
   /cigarette/i, /tobacco/i, /(?<![a-z])cigar(?![a-z])/i,
 ];
-const PROMOTIONS_SCAN_BATCH_LIMIT = 200;
-const PROMOTIONS_MAX_SCANNED_ROWS = 2000;
+const PROMOTIONS_MAX_SCANNED_ROWS = 2000; // kept for hasMore calculation
 let topPromotionsPrewarmPromise: Promise<void> | null = null;
 
 // In-memory cache for chain/store filter data (stable, changes only when scrapor runs)
@@ -171,7 +170,7 @@ function setCachedStores(key: string, data: StoreFilterRow[]): void {
 }
 
 // ── Shared result cache for promotions — TTL 5 min, shared across all users ──
-const PROMOTIONS_RESULT_CACHE_TTL_MS = 5 * 60 * 1000;
+const PROMOTIONS_RESULT_CACHE_TTL_MS = 15 * 60 * 1000; // 15 min — one full query serves all pages
 type PromotionsResultCacheEntry = {
   all: TopPromotionDto[];
   sourceExhausted: boolean;
@@ -548,44 +547,65 @@ router.get('/top-promotions', async (req, res) => {
       return res.status(400).json({ error: 'city is required' });
     }
 
-    const fetchTopPromotionsRows = (batchLimit: number, batchOffset: number) => prisma.$queryRaw<RawTopPromotionRow[]>(Prisma.sql`
-      SELECT
-        item_code,
-        item_name,
-        manufacturer_name,
-        chain_id,
-        chain_name,
-        store_id,
-        store_name,
-        city,
-        unit_of_measure,
-        unit_qty,
-        b_is_weighted,
-        price,
-        promo_price,
-        effective_price,
-        discount_amount,
-        discount_percent,
-        smart_score,
-        promotion_end_date,
-        updated_at,
-        promotion_id,
-        promotion_description,
-        promo_kind,
-        promo_label,
-        is_conditional_promo,
-        has_image
-      FROM public.get_top_city_promotions(
-        ${city}::text,
-        ${chainId || null}::text,
-        ${storeId || null}::text,
-        ${windowHours}::integer,
-        ${batchLimit}::integer,
-        ${batchOffset}::integer,
-        ${sortBy}::text,
-        ${chainName || null}::text
-      )
-    `);
+    // ── Single-shot query directly on top_promotions_cache ────────────────────
+    // Replaces the old 10× batched calls to get_top_city_promotions (offset 0→1800).
+    // That pattern was O(n²): each call re-ran DISTINCT ON + sort then skipped rows.
+    // Now: one SQL query, DISTINCT ON, up to 2000 rows → Node.js filtering.
+
+    const fetchAllPromotionRows = async (): Promise<RawTopPromotionRow[]> => {
+      const chainIdParam  = chainId  || null;
+      const storeIdParam  = storeId  || null;
+      const chainNameParam = chainName || null;
+
+      // Resolve effective window_hours in one inline expression
+      const windowExpr = windowHours === 0
+        ? Prisma.sql`(SELECT COALESCE(
+            (SELECT 0 FROM top_promotions_cache WHERE window_hours = 0 AND scope_type = 'store' LIMIT 1),
+            (SELECT MAX(window_hours) FROM top_promotions_cache WHERE scope_type = 'store')
+          ))`
+        : Prisma.sql`(SELECT COALESCE(
+            (SELECT MAX(window_hours) FROM top_promotions_cache WHERE window_hours <= ${windowHours} AND scope_type = 'store'),
+            (SELECT MIN(window_hours) FROM top_promotions_cache WHERE scope_type = 'store')
+          ))`;
+
+      return prisma.$queryRaw<RawTopPromotionRow[]>(Prisma.sql`
+        WITH resolved_wh AS (SELECT (${windowExpr})::int AS wh),
+        candidates AS (
+          SELECT
+            c.item_code, c.item_name, c.manufacturer_name,
+            c.chain_id, c.chain_name, c.store_id, c.store_name, c.city,
+            c.unit_of_measure, c.unit_qty, c.b_is_weighted,
+            c.price, c.promo_price, c.effective_price, c.discount_amount, c.discount_percent,
+            c.smart_score, c.promotion_end_date, c.updated_at, c.rank_position,
+            COALESCE(c.promotion_id, '') AS promotion_id,
+            COALESCE(c.promotion_description, '') AS promotion_description,
+            COALESCE(c.promo_kind, 'regular') AS promo_kind,
+            COALESCE(c.promo_label, 'מבצע') AS promo_label,
+            COALESCE(c.is_conditional_promo, FALSE) AS is_conditional_promo,
+            c.has_image
+          FROM top_promotions_cache c, resolved_wh r
+          WHERE c.window_hours = r.wh
+            AND c.scope_type = 'store'
+            AND c.has_image IS TRUE
+            AND c.city = ${city}
+            AND (${chainIdParam}::text IS NULL OR c.chain_id = ${chainIdParam}::text)
+            AND (${storeIdParam}::text IS NULL OR c.store_id = ${storeIdParam}::text)
+            AND (${chainNameParam}::text IS NULL OR lower(c.chain_name) = lower(${chainNameParam}::text))
+        ),
+        best_per_item AS (
+          SELECT DISTINCT ON (item_code) *
+          FROM candidates
+          ORDER BY item_code, smart_score DESC NULLS LAST, rank_position ASC
+        )
+        SELECT * FROM best_per_item
+        ORDER BY
+          CASE WHEN ${sortBy} = 'percent' THEN discount_percent END DESC NULLS LAST,
+          CASE WHEN ${sortBy} = 'savings' THEN discount_amount END DESC NULLS LAST,
+          smart_score DESC NULLS LAST,
+          rank_position ASC
+        LIMIT 2000
+      `);
+    };
 
     const tPromotionsSql = process.hrtime.bigint();
     const promoCacheKey = `${city}|${windowHours}|${chainId}|${chainName}|${storeId}|${includeConditionalPromos}|${sortBy}`;
@@ -600,41 +620,30 @@ router.get('/top-promotions', async (req, res) => {
       for (const item of cachedPromoEntry.all) collected.push(item);
       sourceExhausted = cachedPromoEntry.sourceExhausted;
     } else {
-      // Cache miss: collect everything available so all future pages are also served from cache
       const seenPromotionKeys = new Set<string>();
-      let scanOffset = 0;
-      let cacheWarmupDone = false;
 
-      while (scannedRows < PROMOTIONS_MAX_SCANNED_ROWS) {
-        let rows = await fetchTopPromotionsRows(PROMOTIONS_SCAN_BATCH_LIMIT, scanOffset);
+      let allRows = await fetchAllPromotionRows();
 
-        // Cold-start safeguard: warm the SQL cache once and retry.
-        if (rows.length === 0 && !cacheWarmupDone && scanOffset === 0) {
-          const tWarmup = process.hrtime.bigint();
-          await ensureTopPromotionsCachePrewarm(windowHours, 200);
-          timingsMs.cacheWarmupSql = elapsedMs(tWarmup);
-          cacheWarmupDone = true;
-          rows = await fetchTopPromotionsRows(PROMOTIONS_SCAN_BATCH_LIMIT, scanOffset);
-        }
+      // Cold-start safeguard: if cache is empty, prewarm and retry once.
+      if (allRows.length === 0) {
+        const tWarmup = process.hrtime.bigint();
+        await ensureTopPromotionsCachePrewarm(windowHours, 200);
+        timingsMs.cacheWarmupSql = elapsedMs(tWarmup);
+        allRows = await fetchAllPromotionRows();
+      }
 
-        if (rows.length === 0) {
-          sourceExhausted = true;
-          break;
-        }
+      scannedRows = allRows.length;
+      sourceExhausted = allRows.length < 2000;
 
-        scanOffset += rows.length;
-        scannedRows += rows.length;
+      for (const promo of allRows.map(mapTopPromotionRow)) {
+        if (!isValidTopPromotion(promo)) continue;
+        if (!includeConditionalPromos && promo.isConditionalPromo) continue;
 
-        for (const promo of rows.map(mapTopPromotionRow)) {
-          if (!isValidTopPromotion(promo)) continue;
-          if (!includeConditionalPromos && promo.isConditionalPromo) continue;
+        const dedupeKey = buildTopPromotionDedupeKey(promo);
+        if (seenPromotionKeys.has(dedupeKey)) continue;
 
-          const dedupeKey = buildTopPromotionDedupeKey(promo);
-          if (seenPromotionKeys.has(dedupeKey)) continue;
-
-          seenPromotionKeys.add(dedupeKey);
-          collected.push(promo);
-        }
+        seenPromotionKeys.add(dedupeKey);
+        collected.push(promo);
       }
 
       setCachedPromoResult(promoCacheKey, collected, sourceExhausted);
