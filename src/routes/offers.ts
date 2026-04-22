@@ -170,6 +170,22 @@ function setCachedStores(key: string, data: StoreFilterRow[]): void {
   storeFilterCache.set(key, { data, expiresAt: Date.now() + FILTER_CACHE_TTL_MS });
 }
 
+// ── Shared result cache for promotions — TTL 5 min, shared across all users ──
+const PROMOTIONS_RESULT_CACHE_TTL_MS = 5 * 60 * 1000;
+type PromotionsResultCacheEntry = {
+  all: TopPromotionDto[];
+  sourceExhausted: boolean;
+  expiresAt: number;
+};
+const promotionsResultCache = new Map<string, PromotionsResultCacheEntry>();
+function getCachedPromoResult(key: string): PromotionsResultCacheEntry | null {
+  const e = promotionsResultCache.get(key);
+  return e && e.expiresAt > Date.now() ? e : null;
+}
+function setCachedPromoResult(key: string, all: TopPromotionDto[], sourceExhausted: boolean): void {
+  promotionsResultCache.set(key, { all, sourceExhausted, expiresAt: Date.now() + PROMOTIONS_RESULT_CACHE_TTL_MS });
+}
+
 function ensureTopPromotionsCachePrewarm(windowHours = 24, topN = 200): Promise<void> {
   if (!topPromotionsPrewarmPromise) {
     topPromotionsPrewarmPromise = prisma
@@ -572,53 +588,56 @@ router.get('/top-promotions', async (req, res) => {
     `);
 
     const tPromotionsSql = process.hrtime.bigint();
-    const targetCount = offset + limit + 1;
+    const promoCacheKey = `${city}|${windowHours}|${chainId}|${chainName}|${storeId}|${includeConditionalPromos}|${sortBy}`;
+    const cachedPromoEntry = getCachedPromoResult(promoCacheKey);
+
     const collected: TopPromotionDto[] = [];
-    const seenPromotionKeys = new Set<string>();
-    let scanOffset = 0;
     let scannedRows = 0;
     let sourceExhausted = false;
-    let cacheWarmupDone = false;
-    // Start with a small batch (2× what we need) to minimise first-page latency.
-    // Grow to full batch size on subsequent iterations.
-    let currentBatchSize = Math.min(targetCount * 2, PROMOTIONS_SCAN_BATCH_LIMIT);
 
-    while (collected.length < targetCount && scannedRows < PROMOTIONS_MAX_SCANNED_ROWS) {
-      let rows = await fetchTopPromotionsRows(currentBatchSize, scanOffset);
-      currentBatchSize = PROMOTIONS_SCAN_BATCH_LIMIT; // expand from 2nd iteration
+    if (cachedPromoEntry) {
+      // Serve from shared in-memory cache — 0 DB round-trips
+      for (const item of cachedPromoEntry.all) collected.push(item);
+      sourceExhausted = cachedPromoEntry.sourceExhausted;
+    } else {
+      // Cache miss: collect everything available so all future pages are also served from cache
+      const seenPromotionKeys = new Set<string>();
+      let scanOffset = 0;
+      let cacheWarmupDone = false;
 
-      // Cold-start safeguard: warm the SQL cache once and retry from the first page.
-      if (rows.length === 0 && !cacheWarmupDone && scanOffset === 0) {
-        const tWarmup = process.hrtime.bigint();
-        await ensureTopPromotionsCachePrewarm(windowHours, 200);
-        timingsMs.cacheWarmupSql = elapsedMs(tWarmup);
-        cacheWarmupDone = true;
-        rows = await fetchTopPromotionsRows(PROMOTIONS_SCAN_BATCH_LIMIT, scanOffset);
+      while (scannedRows < PROMOTIONS_MAX_SCANNED_ROWS) {
+        let rows = await fetchTopPromotionsRows(PROMOTIONS_SCAN_BATCH_LIMIT, scanOffset);
+
+        // Cold-start safeguard: warm the SQL cache once and retry.
+        if (rows.length === 0 && !cacheWarmupDone && scanOffset === 0) {
+          const tWarmup = process.hrtime.bigint();
+          await ensureTopPromotionsCachePrewarm(windowHours, 200);
+          timingsMs.cacheWarmupSql = elapsedMs(tWarmup);
+          cacheWarmupDone = true;
+          rows = await fetchTopPromotionsRows(PROMOTIONS_SCAN_BATCH_LIMIT, scanOffset);
+        }
+
+        if (rows.length === 0) {
+          sourceExhausted = true;
+          break;
+        }
+
+        scanOffset += rows.length;
+        scannedRows += rows.length;
+
+        for (const promo of rows.map(mapTopPromotionRow)) {
+          if (!isValidTopPromotion(promo)) continue;
+          if (!includeConditionalPromos && promo.isConditionalPromo) continue;
+
+          const dedupeKey = buildTopPromotionDedupeKey(promo);
+          if (seenPromotionKeys.has(dedupeKey)) continue;
+
+          seenPromotionKeys.add(dedupeKey);
+          collected.push(promo);
+        }
       }
 
-      if (rows.length === 0) {
-        sourceExhausted = true;
-        break;
-      }
-
-      scanOffset += rows.length;
-      scannedRows += rows.length;
-
-      // Context (promotionId, promoKind, isConditionalPromo) is now embedded in the cache row —
-      // no extra resolvePromoContexts SQL round-trip needed.
-      for (const promo of rows.map(mapTopPromotionRow)) {
-        if (!isValidTopPromotion(promo)) continue;
-        if (!includeConditionalPromos && promo.isConditionalPromo) continue;
-
-        // Keep a single card per product name across city results.
-        const dedupeKey = buildTopPromotionDedupeKey(promo);
-        if (seenPromotionKeys.has(dedupeKey)) continue;
-
-        seenPromotionKeys.add(dedupeKey);
-        collected.push(promo);
-
-        if (collected.length >= targetCount) break;
-      }
+      setCachedPromoResult(promoCacheKey, collected, sourceExhausted);
     }
 
     timingsMs.promotionsSql = elapsedMs(tPromotionsSql);
