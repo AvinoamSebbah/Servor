@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import axios from 'axios';
+import { v2 as cloudinary } from 'cloudinary';
 import fs from 'fs';
 import https from 'https';
 import path from 'path';
@@ -24,6 +25,19 @@ const skipTlsVerify = String(process.env.DO_SPACES_SKIP_TLS_VERIFY || '').trim()
 const externalHttpsAgent = new https.Agent({
   rejectUnauthorized: !skipTlsVerify,
 });
+
+if (
+  process.env.CLOUDINARY_CLOUD_NAME &&
+  process.env.CLOUDINARY_API_KEY &&
+  process.env.CLOUDINARY_API_SECRET
+) {
+  cloudinary.config({
+    cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+    api_key: process.env.CLOUDINARY_API_KEY,
+    api_secret: process.env.CLOUDINARY_API_SECRET,
+    secure: true,
+  });
+}
 
 const CHAIN_NAME_SLUG_MAP: Record<string, string> = {
   'BE': 'be',
@@ -99,6 +113,34 @@ function getBucketOrThrow(): string {
 
 function nowMs(): number {
   return Date.now();
+}
+
+function isCloudinaryBridgeEnabled(): boolean {
+  return Boolean(
+    process.env.CLOUDINARY_CLOUD_NAME &&
+    process.env.CLOUDINARY_API_KEY &&
+    process.env.CLOUDINARY_API_SECRET,
+  );
+}
+
+async function fetchViaCloudinaryBridge(remoteUrl: string, publicId: string): Promise<string> {
+  if (!isCloudinaryBridgeEnabled()) {
+    throw new Error('Cloudinary bridge is not configured');
+  }
+
+  const result = await cloudinary.uploader.upload(remoteUrl, {
+    public_id: publicId,
+    folder: 'spaces-bridge',
+    overwrite: true,
+    invalidate: false,
+    resource_type: 'image',
+  });
+
+  if (!result.secure_url) {
+    throw new Error('Cloudinary bridge upload did not return secure_url');
+  }
+
+  return result.secure_url;
 }
 
 async function objectExists(key: string): Promise<boolean> {
@@ -195,8 +237,19 @@ async function findAndPersistMissingImage(barcode: string, key: string): Promise
   try {
     await uploadRemoteImageToSpaces(key, pricezUrl, 'pricez');
     return { imageUrl: getSignedProductDeliveryUrl(barcode), source: 'pricez' };
-  } catch {
-    // continue to OpenFoodFacts
+  } catch (error) {
+    if (isCloudinaryBridgeEnabled()) {
+      try {
+        const bridgedUrl = await fetchViaCloudinaryBridge(pricezUrl, `pricez-${barcode}`);
+        await uploadRemoteImageToSpaces(key, bridgedUrl, 'pricez-cloudinary-bridge');
+        return { imageUrl: getSignedProductDeliveryUrl(barcode), source: 'pricez-cloudinary-bridge' };
+      } catch (bridgeError) {
+        console.warn(`[PRODUCT IMAGE] Pricez bridge failed for ${barcode}`, {
+          directError: error instanceof Error ? error.message : String(error),
+          bridgeError: bridgeError instanceof Error ? bridgeError.message : String(bridgeError),
+        });
+      }
+    }
   }
 
   const openFoodFactsUrl = await fetchOpenFoodFactsUrl(barcode);
