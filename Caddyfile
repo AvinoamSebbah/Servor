@@ -1,0 +1,11 @@
+api.agali.live {
+    reverse_proxy backend:3001
+}
+
+translate.agali.live {
+    reverse_proxy 172.17.0.1:5000
+}
+
+img.agali.live {
+    reverse_proxy imgproxy:8080
+}

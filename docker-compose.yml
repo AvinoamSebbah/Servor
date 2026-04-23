@@ -48,6 +48,25 @@ services:
       - caddy_config:/config
     depends_on:
       - backend
+      - imgproxy
+
+  imgproxy:
+    image: darthsim/imgproxy:latest
+    restart: always
+    networks:
+      - agali-network
+    environment:
+      PORT: "8080"
+      IMGPROXY_USE_S3: "true"
+      IMGPROXY_S3_REGION: ${DO_SPACES_REGION}
+      IMGPROXY_S3_ENDPOINT: "https://${DO_SPACES_REGION}.digitaloceanspaces.com"
+      IMGPROXY_S3_ENDPOINT_USE_PATH_STYLE: "false"
+      AWS_ACCESS_KEY_ID: ${DO_SPACES_ACCESS_KEY}
+      AWS_SECRET_ACCESS_KEY: ${DO_SPACES_SECRET_KEY}
+      IMGPROXY_KEY: ${IMGPROXY_KEY}
+      IMGPROXY_SALT: ${IMGPROXY_SALT}
+    expose:
+      - "8080"
 
 volumes:
   postgres_data:

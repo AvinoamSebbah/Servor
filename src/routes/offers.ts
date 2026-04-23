@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { Prisma, PrismaClient } from '@prisma/client';
 import { buildOffsetPagination, mapOfferRow, RawOfferRow, toNullableNumber } from '../services/offerMapping';
 import { buildPromoLookupKey, enrichApiOffersWithPromoContext, resolvePromoContexts } from '../services/promoContext';
+import { getProductDeliveryUrl } from './images';
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -98,6 +99,7 @@ type TopPromotionDto = {
   itemCode: string;
   itemName: string | null;
   manufacturerName: string | null;
+  imageUrl: string | null;
   chainId: string;
   chainName: string | null;
   storeId: string;
@@ -209,6 +211,7 @@ function mapTopPromotionRow(row: RawTopPromotionRow): TopPromotionDto {
     itemCode: row.item_code,
     itemName: row.item_name,
     manufacturerName: row.manufacturer_name,
+    imageUrl: getProductDeliveryUrl(row.item_code),
     chainId: row.chain_id,
     chainName: row.chain_name,
     storeId: row.store_id,
@@ -843,6 +846,7 @@ type StorePromoDto = {
   itemCode: string;
   itemName: string | null;
   manufacturerName: string | null;
+  imageUrl: string | null;
   unitOfMeasure: string | null;
   unitQty: string | null;
   bIsWeighted: boolean;
@@ -875,6 +879,7 @@ function mapStorePromoRow(row: RawStorePromoRow): StorePromoDto {
     itemCode: row.item_code,
     itemName: row.item_name,
     manufacturerName: row.manufacturer_name,
+    imageUrl: getProductDeliveryUrl(row.item_code),
     unitOfMeasure: row.unit_of_measure,
     unitQty: row.unit_qty,
     bIsWeighted: parseUnknownBoolean(row.b_is_weighted, false),

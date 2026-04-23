@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { PrismaClient, Prisma } from '@prisma/client';
-import { resolveImage, getCloudinaryProductDeliveryUrl } from './images';
+import { resolveImage, getProductDeliveryUrl } from './images';
 import { buildOffsetPagination, mapOfferRow, mapOffersToLegacyDetails, RawOfferRow } from '../services/offerMapping';
 import { enrichApiOffersWithPromoContext } from '../services/promoContext';
 
@@ -185,7 +185,7 @@ router.get('/search', async (req, res) => {
 
     const tResponseMap = process.hrtime.bigint();
     const products = rows.map((row) => ({
-      imageUrl: getCloudinaryProductDeliveryUrl(row.item_code),
+      imageUrl: getProductDeliveryUrl(row.item_code),
       ...(detailsByItemCode.get(row.item_code)
         ? {
             prices: detailsByItemCode.get(row.item_code)!.prices,
@@ -575,9 +575,9 @@ router.get('/search/fast', async (req, res) => {
 
     const tImageLookup = markStart();
     const imageMap = Object.fromEntries(
-      itemCodes.map((code) => [code, getCloudinaryProductDeliveryUrl(code)])
+      itemCodes.map((code) => [code, getProductDeliveryUrl(code)])
     );
-    markEnd('cloudinaryLookup', tImageLookup);
+    markEnd('imageLookup', tImageLookup);
 
     const products = rows.map(row => {
       const stats = priceStatsByCode.get(row.itemCode) ?? { minPrice: null, chains: new Set<string>() };

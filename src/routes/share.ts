@@ -1,46 +1,15 @@
 import { Router, Request, Response } from 'express';
 import { PrismaClient } from '@prisma/client';
+import { getCatalogImageUrl } from '../utils/media';
 
 const router = Router();
 const prisma = new PrismaClient();
 
-const CLOUD_NAME = 'dprve5nst';
-
-// Build a dynamic OG image: first product blurred as background, products overlaid neatly
+// Use the first catalog product image as the OG preview.
 function buildOgImageUrl(productIds: string[]): string {
-  const base = `https://res.cloudinary.com/${CLOUD_NAME}/image/upload`;
   const ids = productIds.filter(Boolean);
   const bgId = ids[0] || 'p_01_01_001';
-  const overlayIds = ids.slice(0, 3).map((id) => `catalog:${id}`);
-
-  // Start with: resize to 1200×630, heavily blur + darken the background
-  const parts: string[] = [
-    'c_fill,w_1200,h_630,g_center',
-    'e_blur:700,e_brightness:-65',
-  ];
-
-  // Overlay the product images on top, nicely centered
-  if (overlayIds.length >= 3) {
-    // 3 products: smaller side ones, bigger center
-    parts.push(`l_${overlayIds[0]}/c_fill,w_270,h_270,r_20/fl_layer_apply,g_center,x_-315,y_-20`);
-    parts.push(`l_${overlayIds[1]}/c_fill,w_340,h_340,r_26/fl_layer_apply,g_center,y_20`);
-    parts.push(`l_${overlayIds[2]}/c_fill,w_270,h_270,r_20/fl_layer_apply,g_center,x_315,y_-20`);
-  } else if (overlayIds.length === 2) {
-    parts.push(`l_${overlayIds[0]}/c_fill,w_310,h_310,r_22/fl_layer_apply,g_center,x_-185`);
-    parts.push(`l_${overlayIds[1]}/c_fill,w_310,h_310,r_22/fl_layer_apply,g_center,x_185`);
-  } else {
-    // Single product: large, centered
-    parts.push(`l_${overlayIds[0]}/c_fill,w_440,h_440,r_30/fl_layer_apply,g_center`);
-  }
-
-  // Agali logo + text "agali" right-aligned, bottom-right corner
-  // Use Arial which is always available on Cloudinary
-  parts.push(`l_agali:logo/c_fit,w_90,h_90/fl_layer_apply,g_south_east,x_240,y_36`);
-  parts.push(`l_text:Arial_68_bold:agali/co_rgb:ffffff/fl_layer_apply,g_south_east,x_40,y_40`);
-
-  parts.push('f_jpg,q_85');
-
-  return `${base}/${parts.join('/')}/catalog/${bgId}`;
+  return getCatalogImageUrl(bgId) ?? '';
 }
 
 // Escape HTML entities to prevent injection in the OG HTML page
