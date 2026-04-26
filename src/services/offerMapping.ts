@@ -3,6 +3,7 @@ export type RawOfferRow = {
   item_name: string | null;
   manufacturer_name: string | null;
   chain_id: string;
+  chain_name?: string | null;
   store_id: string;
   store_name: string | null;
   city: string | null;
@@ -25,6 +26,7 @@ export type ApiOffer = {
   itemName: string | null;
   manufacturerName: string | null;
   chainId: string;
+  chainName?: string | null;
   storeId: string;
   storeName: string | null;
   city: string | null;
@@ -142,6 +144,7 @@ export function mapOfferRow(row: RawOfferRow): ApiOffer {
     itemName: row.item_name,
     manufacturerName: row.manufacturer_name,
     chainId: row.chain_id,
+    chainName: row.chain_name ?? null,
     storeId: row.store_id,
     storeName: row.store_name,
     city: row.city,
@@ -195,8 +198,8 @@ export function mapOffersToLegacyDetails(offers: ApiOffer[]): LegacyDetailShape 
         id: Number.isFinite(numericStoreId) ? numericStoreId : 0,
         chainId: offer.chainId,
         storeId: offer.storeId,
-        chainName: resolveChainName(offer.chainId),
-        storeName: offer.storeName ?? resolveChainName(offer.chainId),
+        chainName: offer.chainName || resolveChainName(offer.chainId),
+        storeName: offer.storeName ?? (offer.chainName || resolveChainName(offer.chainId)),
         city: offer.city ?? '',
       },
     });

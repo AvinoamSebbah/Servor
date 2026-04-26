@@ -139,6 +139,7 @@ router.get('/search', async (req, res) => {
           o.item_name,
           o.manufacturer_name,
           o.chain_id,
+          s_name.chain_name,
           o.store_id,
           o.store_name,
           o.city,
@@ -157,6 +158,9 @@ router.get('/search', async (req, res) => {
           ${detailsLimit}::integer,
           0::integer
         ) o
+        LEFT JOIN LATERAL (
+          SELECT chain_name FROM stores WHERE chain_id = o.chain_id AND store_id = o.store_id LIMIT 1
+        ) s_name ON true
         ORDER BY o.item_code ASC, o.effective_price ASC NULLS LAST, o.updated_at DESC NULLS LAST, o.store_id ASC
       `);
       timingsMs.offersSql = elapsedMs(tOffersSql);
@@ -1274,28 +1278,32 @@ router.get('/:barcode', async (req, res) => {
     const tOffersSql = process.hrtime.bigint();
     const offerRows = await prisma.$queryRaw<RawOfferRow[]>(Prisma.sql`
       SELECT
-        item_code,
-        item_name,
-        manufacturer_name,
-        chain_id,
-        store_id,
-        store_name,
-        city,
-        price,
-        promo_price,
-        effective_price,
-        unit_of_measure,
-        unit_qty,
-        b_is_weighted,
-        updated_at
+        o.item_code,
+        o.item_name,
+        o.manufacturer_name,
+        o.chain_id,
+        s_name.chain_name,
+        o.store_id,
+        o.store_name,
+        o.city,
+        o.price,
+        o.promo_price,
+        o.effective_price,
+        o.unit_of_measure,
+        o.unit_qty,
+        o.b_is_weighted,
+        o.updated_at
       FROM public.get_offers_for_item_code(
         ${barcode}::text,
         ${cityText || null}::text,
         NULL::text,
         300::integer,
         0::integer
-      )
-      ORDER BY effective_price ASC NULLS LAST, updated_at DESC NULLS LAST, store_id ASC
+      ) o
+      LEFT JOIN LATERAL (
+        SELECT chain_name FROM stores WHERE chain_id = o.chain_id AND store_id = o.store_id LIMIT 1
+      ) s_name ON true
+      ORDER BY o.effective_price ASC NULLS LAST, o.updated_at DESC NULLS LAST, o.store_id ASC
     `);
     timingsMs.offersSql = elapsedMs(tOffersSql);
 

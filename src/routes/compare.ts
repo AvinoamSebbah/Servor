@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { PrismaClient, Prisma } from '@prisma/client';
-import { mapOfferRow, mapOffersToLegacyDetails } from '../services/offerMapping';
+import { mapOfferRow } from '../services/offerMapping';
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -39,6 +39,7 @@ router.post('/', async (req, res) => {
         o.item_name,
         o.manufacturer_name,
         o.chain_id,
+        s_name.chain_name,
         o.store_id,
         o.store_name,
         o.city,
@@ -57,6 +58,9 @@ router.post('/', async (req, res) => {
         ${50}::integer,
         0::integer
       ) o
+      LEFT JOIN LATERAL (
+        SELECT chain_name FROM stores WHERE chain_id = o.chain_id AND store_id = o.store_id LIMIT 1
+      ) s_name ON true
       ORDER BY o.item_code ASC, o.effective_price ASC NULLS LAST, o.updated_at DESC NULLS LAST, o.store_id ASC
     `);
     timingsMs.offersSql = Number(process.hrtime.bigint() - tOffersSql) / 1_000_000;
@@ -74,6 +78,7 @@ router.post('/', async (req, res) => {
           storeId: row.storeId,
           storeName: row.storeName,
           chainId: row.chainId,
+          chainName: row.chainName,
           city: row.city,
           sampleOffer: row,
           itemsMap: new Map<string, any>(),
@@ -116,18 +121,8 @@ router.post('/', async (req, res) => {
         totalPrice += (it.price ?? 0) * qty;
       }
       if (itemsArr.length === 0) continue;
-      // derive chainName from sample offer mapping
-      let chainName = entry.chainId || '';
-      try {
-        if (entry.sampleOffer) {
-          const details = mapOffersToLegacyDetails([entry.sampleOffer]);
-          if (details.prices && details.prices[0] && details.prices[0].store?.chainName) {
-            chainName = details.prices[0].store.chainName;
-          }
-        }
-      } catch (e) {
-        // fallback to chainId string
-      }
+      // derive chainName directly from the store row (chain_name from DB)
+      const chainName = entry.chainName || entry.chainId || '';
 
       result.push({
         storeId: Number(storeDbId),
