@@ -746,14 +746,7 @@ router.get('/top-promotions', async (req, res) => {
         storeName: row.store_name,
         city: row.city,
         promoCount: storePromoCounts.get(`${row.chain_id}::${row.store_id}`) ?? 0,
-      }))
-      .filter((row) => {
-        if (row.promoCount > 0) return true;
-        if (chainId && row.chainId === chainId) {
-          return !storeId || row.storeId === storeId;
-        }
-        return false;
-      });
+      }));
 
     timingsMs.total = elapsedMs(tRouteStart);
     res.setHeader('Server-Timing', toServerTiming(timingsMs));

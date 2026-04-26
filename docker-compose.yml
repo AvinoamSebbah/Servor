@@ -65,6 +65,7 @@ services:
       AWS_SECRET_ACCESS_KEY: ${DO_SPACES_SECRET_KEY}
       IMGPROXY_KEY: ${IMGPROXY_KEY}
       IMGPROXY_SALT: ${IMGPROXY_SALT}
+      IMGPROXY_ALLOW_ORIGIN: "*"
     expose:
       - "8080"
 
