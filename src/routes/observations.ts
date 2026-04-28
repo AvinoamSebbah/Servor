@@ -99,7 +99,7 @@ router.post('/', async (req: Request, res: Response) => {
   const user = await getUserByToken(token);
   if (!user) return res.status(401).json({ error: 'Invalid or expired session' });
 
-  const { item_code, city, min_discount_pct, store_id } = req.body;
+  const { item_code, city, min_discount_pct, store_id, base_price, target_price } = req.body;
 
   if (!item_code || typeof item_code !== 'string') {
     return res.status(400).json({ error: 'item_code is required' });
@@ -111,6 +111,8 @@ router.post('/', async (req: Request, res: Response) => {
   if (!Number.isFinite(pct) || pct < 1 || pct > 100) {
     return res.status(400).json({ error: 'min_discount_pct must be between 1 and 100' });
   }
+  const basePriceVal = base_price != null ? parseFloat(base_price) : null;
+  const targetPriceVal = target_price != null ? parseFloat(target_price) : null;
 
   try {
     // Resolve product_id from item_code
@@ -125,11 +127,13 @@ router.post('/', async (req: Request, res: Response) => {
 
     await prisma.$executeRawUnsafe(
       `INSERT INTO observations
-         (user_id, product_id, item_code, city, store_id, min_discount_pct, status, expires_at, updated_at)
-       VALUES ($1, $2, $3, $4, $5, $6, 'active', NOW() + INTERVAL '6 months', NOW())
+         (user_id, product_id, item_code, city, store_id, min_discount_pct, base_price, target_price, status, expires_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'active', NOW() + INTERVAL '6 months', NOW())
        ON CONFLICT ON CONSTRAINT observations_user_product_city_unique
        DO UPDATE SET
          min_discount_pct = EXCLUDED.min_discount_pct,
+         base_price       = EXCLUDED.base_price,
+         target_price     = EXCLUDED.target_price,
          store_id         = EXCLUDED.store_id,
          status           = 'active',
          expires_at       = NOW() + INTERVAL '6 months',
@@ -139,7 +143,9 @@ router.post('/', async (req: Request, res: Response) => {
       item_code,
       city,
       store_id ?? null,
-      pct
+      pct,
+      basePriceVal,
+      targetPriceVal
     );
 
     return res.status(201).json({ success: true });
