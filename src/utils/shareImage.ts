@@ -120,6 +120,8 @@ const CHAIN_ID_SLUG_MAP: Record<string, string> = {
 const FILE_CACHE = new Map<string, string | null>();
 const REMOTE_TEXT_CACHE = new Map<string, string | null>();
 const PUBLIC_FRONTEND_BASE_URL = 'https://agali.live';
+const LOCAL_PUBLIC_DIR = path.resolve(process.cwd(), 'public');
+const LOCAL_AGALI_LOGO_PATH = path.join(LOCAL_PUBLIC_DIR, 'logo.png');
 
 function escapeXml(value: string): string {
   return value
@@ -297,8 +299,12 @@ async function fetchDataUri(url: string): Promise<string | null> {
       },
     });
     const typeHeader = String(response.headers['content-type'] || 'image/jpeg');
-    const buffer = Buffer.from(response.data);
-    const type = detectContentType(buffer, typeHeader.split(';')[0]);
+    let buffer = Buffer.from(response.data);
+    let type = detectContentType(buffer, typeHeader.split(';')[0]);
+    if (type === 'image/webp') {
+      buffer = Buffer.from(await sharp(buffer).png().toBuffer());
+      type = 'image/png';
+    }
     return toDataUri(type, buffer);
   } catch {
     return null;
@@ -495,7 +501,9 @@ export async function generateProductShareImage(
   const palette = getThemePalette(theme);
   const copy = getCopy(lang);
   const meta = await getProductShareMeta(prisma, barcode, city);
-  const logoDataUri = await fetchDataUri(`${PUBLIC_FRONTEND_BASE_URL}/logo.png`);
+  const logoDataUri =
+    (await readFileDataUri(LOCAL_AGALI_LOGO_PATH, 'image/png')) ??
+    (await fetchDataUri(`${PUBLIC_FRONTEND_BASE_URL}/logo.png`));
   const productImageCandidates = [
     `https://m.pricez.co.il/ProductPictures/200x/${encodeURIComponent(barcode)}.jpg`,
     `https://res.cloudinary.com/dprve5nst/image/upload/w_360,h_360,c_pad,b_white/products/${encodeURIComponent(barcode)}.jpg`,
@@ -508,8 +516,6 @@ export async function generateProductShareImage(
   const productLines = splitLines(meta.itemName, 30, 2);
   const manufacturer = truncate(meta.manufacturerName || copy.compare, 34);
   const safeCity = truncate(city || 'תל אביב', 18);
-  const titleX = isRtl ? 704 : 84;
-  const titleAnchor = isRtl ? 'end' : 'start';
   const cityLabelX = isRtl ? 918 : 904;
   const cityValueX = isRtl ? 1100 : 936;
   const cityValueAnchor = isRtl ? 'end' : 'start';
@@ -517,6 +523,8 @@ export async function generateProductShareImage(
   const heroCardHeight = 212;
   const titleCardX = 56;
   const titleCardWidth = 676;
+  const titleX = titleCardX + titleCardWidth - 28;
+  const titleAnchor = 'end';
   const imageCardX = 804;
   const imageCardWidth = 262;
   const gridStartX = 48;
@@ -524,7 +532,7 @@ export async function generateProductShareImage(
   const cardGapX = 24;
   const cardGapY = 20;
   const cardWidth = 540;
-  const cardHeight = 118;
+  const cardHeight = 128;
 
   const rows = meta.offers.map((offer, index) => {
     const hasDiscount =
@@ -537,14 +545,14 @@ export async function generateProductShareImage(
     const row = Math.floor(index / 2);
     const x = gridStartX + column * (cardWidth + cardGapX);
     const y = gridStartY + row * (cardHeight + cardGapY);
-    const nameLines = splitLinesNoEllipsis(offer.chainName, isRtl ? 11 : 13, 2).map(escapeXml);
+    const nameLines = splitLinesNoEllipsis(offer.chainName, isRtl ? 11 : 12, 2).map(escapeXml);
      const contentLeft = x + 24;
      const contentRight = x + cardWidth - 24;
-    const logoCardWidth = 96;
-    const logoCardHeight = 76;
+    const logoCardWidth = 108;
+    const logoCardHeight = 86;
      const logoCardX = isRtl ? contentRight - logoCardWidth : contentLeft;
     const logoImageX = logoCardX;
-    const logoImageY = y + 16;
+    const logoImageY = y + 18;
     const logoImageWidth = logoCardWidth;
     const logoImageHeight = logoCardHeight;
     const nameX = isRtl ? logoCardX - 18 : logoCardX + logoCardWidth + 18;
@@ -558,22 +566,22 @@ export async function generateProductShareImage(
          <text x="${promoBadgeTextX}" y="${y + 42}" text-anchor="middle" font-size="15" font-weight="700" fill="${palette.badgeText}" font-family="Rubik, sans-serif">${escapeXml(copy.promo)}</text>`
       : '';
     const priceBlock = hasDiscount
-      ? `<text x="${priceX}" y="${y + 34}" text-anchor="${priceAnchor}" font-size="16" font-weight="600" fill="${palette.strike}" text-decoration="line-through" font-family="Rubik, sans-serif">${escapeXml(formatPrice(offer.price))}</text>
-        <text x="${priceX}" y="${y + 82}" text-anchor="${priceAnchor}" font-size="40" font-weight="800" fill="${palette.promo}" font-family="Rubik, sans-serif">${escapeXml(formatPrice(offer.effectivePrice))}</text>`
-      : `<text x="${priceX}" y="${y + 74}" text-anchor="${priceAnchor}" font-size="40" font-weight="800" fill="${palette.promo}" font-family="Rubik, sans-serif">${escapeXml(formatPrice(offer.effectivePrice ?? offer.price))}</text>`;
+      ? `<text x="${priceX}" y="${y + 36}" text-anchor="${priceAnchor}" font-size="18" font-weight="600" fill="${palette.strike}" text-decoration="line-through" font-family="Rubik, sans-serif">${escapeXml(formatPrice(offer.price))}</text>
+        <text x="${priceX}" y="${y + 88}" text-anchor="${priceAnchor}" font-size="44" font-weight="800" fill="${palette.promo}" font-family="Rubik, sans-serif">${escapeXml(formatPrice(offer.effectivePrice))}</text>`
+      : `<text x="${priceX}" y="${y + 80}" text-anchor="${priceAnchor}" font-size="44" font-weight="800" fill="${palette.promo}" font-family="Rubik, sans-serif">${escapeXml(formatPrice(offer.effectivePrice ?? offer.price))}</text>`;
     const logoMarkup = offer.logoDataUri
       ? `<clipPath id="logoCardClip${index}">
-          <rect x="${logoCardX}" y="${y + 16}" width="${logoCardWidth}" height="${logoCardHeight}" rx="18" ry="18" />
+          <rect x="${logoCardX}" y="${y + 18}" width="${logoCardWidth}" height="${logoCardHeight}" rx="20" ry="20" />
         </clipPath>
         <image href="${offer.logoDataUri}" x="${logoImageX}" y="${logoImageY}" width="${logoImageWidth}" height="${logoImageHeight}" preserveAspectRatio="xMidYMid slice" clip-path="url(#logoCardClip${index})" />`
-      : `<rect x="${logoCardX}" y="${y + 16}" width="${logoCardWidth}" height="${logoCardHeight}" rx="18" fill="${palette.accentSoft}" stroke="${palette.panelBorder}" />
-        <text x="${logoCardX + logoCardWidth / 2}" y="${y + 62}" text-anchor="middle" font-size="24" font-weight="800" fill="${palette.accent}" font-family="Rubik, sans-serif">${escapeXml((offer.chainName || offer.storeName || '?').slice(0, 1))}</text>`;
+      : `<rect x="${logoCardX}" y="${y + 18}" width="${logoCardWidth}" height="${logoCardHeight}" rx="20" fill="${palette.accentSoft}" stroke="${palette.panelBorder}" />
+        <text x="${logoCardX + logoCardWidth / 2}" y="${y + 70}" text-anchor="middle" font-size="28" font-weight="800" fill="${palette.accent}" font-family="Rubik, sans-serif">${escapeXml((offer.chainName || offer.storeName || '?').slice(0, 1))}</text>`;
 
     return `
       <rect x="${x}" y="${y}" width="${cardWidth}" height="${cardHeight}" rx="24" fill="${palette.panel}" stroke="${palette.line}" />
       ${logoMarkup}
-      <text x="${nameX}" y="${nameLines.length > 1 ? y + 60 : y + 70}" text-anchor="${nameAnchor}" font-size="22" font-weight="700" fill="${palette.text}" font-family="Rubik, sans-serif">${nameLines[0] || ''}</text>
-      ${nameLines[1] ? `<text x="${nameX}" y="${y + 88}" text-anchor="${nameAnchor}" font-size="22" font-weight="700" fill="${palette.text}" font-family="Rubik, sans-serif">${nameLines[1]}</text>` : ''}
+      <text x="${nameX}" y="${nameLines.length > 1 ? y + 62 : y + 76}" text-anchor="${nameAnchor}" font-size="24" font-weight="700" fill="${palette.text}" font-family="Rubik, sans-serif">${nameLines[0] || ''}</text>
+      ${nameLines[1] ? `<text x="${nameX}" y="${y + 92}" text-anchor="${nameAnchor}" font-size="24" font-weight="700" fill="${palette.text}" font-family="Rubik, sans-serif">${nameLines[1]}</text>` : ''}
       ${promoBadge}
       ${priceBlock}
     `;

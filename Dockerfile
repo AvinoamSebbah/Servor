@@ -18,6 +18,7 @@ RUN --mount=type=cache,id=pnpm,target=/pnpm/store pnpm install --frozen-lockfile
 FROM deps AS build
 COPY tsconfig.json ./
 COPY prisma ./prisma
+COPY public ./public
 COPY src ./src
 # `pnpm run build` = prisma generate + tsc (see package.json scripts)
 RUN pnpm run build
@@ -34,6 +35,7 @@ COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
 COPY --from=build /app/package.json ./package.json
 COPY --from=build /app/prisma ./prisma
+COPY --from=build /app/public ./public
 # Ensure upload directories exist even if `public/` is absent from the git checkout.
 RUN mkdir -p /app/public/images/products /app/public/images/stores
 
