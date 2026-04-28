@@ -14,6 +14,7 @@ import offersRouter from './routes/offers';
 import shoppingListsRouter from './routes/shoppingLists';
 import shareRouter from './routes/share';
 import translateRouter from './routes/translate';
+import observationsRouter from './routes/observations';
 
 dotenv.config();
 
@@ -68,6 +69,7 @@ app.use('/api/offers', offersRouter);
 app.use('/api/lists', shoppingListsRouter);
 app.use('/api/auth', authRouter);
 app.use('/api/user', userRouter);
+app.use('/api/observations', observationsRouter);
 app.use('/share', shareRouter);
 app.use('/api/translate', translateRouter);
 
