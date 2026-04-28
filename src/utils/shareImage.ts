@@ -34,8 +34,10 @@ type ShareOffer = {
   logoDataUri: string | null;
 };
 
-export const SHARE_IMAGE_WIDTH = 1200;
-export const SHARE_IMAGE_HEIGHT = 780;
+const CANVAS_WIDTH = 1200;
+const CANVAS_HEIGHT = 780;
+export const SHARE_IMAGE_WIDTH = 840;
+export const SHARE_IMAGE_HEIGHT = 546;
 
 const CHAIN_SLUG_MAP: Record<string, string> = {
   BE: 'be',
@@ -511,14 +513,14 @@ export async function generateProductShareImage(
   const cityLabelX = isRtl ? 918 : 904;
   const cityValueX = isRtl ? 1100 : 936;
   const cityValueAnchor = isRtl ? 'end' : 'start';
-  const heroCardY = 156;
+  const heroCardY = 182;
   const heroCardHeight = 212;
   const titleCardX = 56;
   const titleCardWidth = 676;
   const imageCardX = 804;
   const imageCardWidth = 262;
   const gridStartX = 48;
-  const gridStartY = 412;
+  const gridStartY = 438;
   const cardGapX = 24;
   const cardGapY = 20;
   const cardWidth = 540;
@@ -583,9 +585,9 @@ export async function generateProductShareImage(
        <text x="${imageCardX + imageCardWidth / 2}" y="${heroCardY + 122}" text-anchor="middle" font-size="72" font-weight="700" fill="${palette.accent}" font-family="'Space Grotesk', sans-serif">A</text>`;
 
   const svg = `
-  <svg width="${SHARE_IMAGE_WIDTH}" height="${SHARE_IMAGE_HEIGHT}" viewBox="0 0 ${SHARE_IMAGE_WIDTH} ${SHARE_IMAGE_HEIGHT}" xmlns="http://www.w3.org/2000/svg">
+  <svg width="${CANVAS_WIDTH}" height="${CANVAS_HEIGHT}" viewBox="0 0 ${CANVAS_WIDTH} ${CANVAS_HEIGHT}" xmlns="http://www.w3.org/2000/svg">
     <defs>
-      <linearGradient id="bg" x1="0" y1="0" x2="${SHARE_IMAGE_WIDTH}" y2="${SHARE_IMAGE_HEIGHT}" gradientUnits="userSpaceOnUse">
+      <linearGradient id="bg" x1="0" y1="0" x2="${CANVAS_WIDTH}" y2="${CANVAS_HEIGHT}" gradientUnits="userSpaceOnUse">
         <stop stop-color="${palette.bgStart}" />
         <stop offset="1" stop-color="${palette.bgEnd}" />
       </linearGradient>
@@ -596,28 +598,27 @@ export async function generateProductShareImage(
         <rect x="${imageCardX}" y="${heroCardY}" width="${imageCardWidth}" height="${heroCardHeight}" rx="32" ry="32" />
       </clipPath>
     </defs>
-    <rect width="${SHARE_IMAGE_WIDTH}" height="${SHARE_IMAGE_HEIGHT}" fill="url(#bg)" />
+    <rect width="${CANVAS_WIDTH}" height="${CANVAS_HEIGHT}" fill="url(#bg)" />
     <circle cx="1090" cy="120" r="180" fill="${palette.accentSoft}" />
     <circle cx="138" cy="710" r="190" fill="${palette.accentSoft}" />
 
     <rect x="40" y="34" width="1120" height="712" rx="38" fill="transparent" stroke="${palette.line}" />
 
     <g>
-      <rect x="56" y="50" width="1088" height="80" rx="28" fill="${palette.panel}" stroke="${palette.panelBorder}" />
-      ${logoDataUri ? `<image href="${logoDataUri}" x="82" y="66" width="48" height="48" preserveAspectRatio="xMidYMid meet" />` : `<rect x="82" y="66" width="48" height="48" rx="14" fill="${palette.accentSoft}" />`}
-      <text x="144" y="94" font-size="31" font-weight="800" fill="${palette.text}" font-family="'Space Grotesk', Rubik, sans-serif">AGALI</text>
-      <text x="144" y="116" font-size="14" font-weight="600" fill="${palette.muted}" font-family="Rubik, sans-serif">${escapeXml(copy.compare)}</text>
-      <rect x="894" y="68" width="232" height="44" rx="22" fill="${palette.accentSoft}" stroke="${palette.panelBorder}" />
-      <text x="${cityLabelX}" y="96" font-size="16" font-weight="700" fill="${palette.accent}" font-family="Rubik, sans-serif">${escapeXml(copy.byCity)}</text>
-      <text x="${cityValueX}" y="96" text-anchor="${cityValueAnchor}" font-size="18" font-weight="700" fill="${palette.text}" font-family="Rubik, sans-serif">${escapeXml(safeCity)}</text>
+      <rect x="56" y="34" width="1088" height="124" rx="32" fill="${palette.panel}" stroke="${palette.panelBorder}" />
+      ${logoDataUri ? `<image href="${logoDataUri}" x="70" y="42" width="108" height="108" preserveAspectRatio="xMidYMid meet" />` : `<rect x="70" y="42" width="108" height="108" rx="24" fill="${palette.accentSoft}" />`}
+      <text x="198" y="91" font-size="56" font-weight="800" fill="${palette.text}" font-family="'Space Grotesk', Rubik, sans-serif">AGALI</text>
+      <text x="198" y="126" font-size="17" font-weight="600" fill="${palette.muted}" font-family="Rubik, sans-serif">${escapeXml(copy.compare)}</text>
+      <rect x="900" y="68" width="220" height="56" rx="24" fill="${palette.accentSoft}" stroke="${palette.panelBorder}" />
+      <text x="1010" y="103" text-anchor="middle" font-size="23" font-weight="700" fill="${palette.text}" font-family="Rubik, sans-serif">${escapeXml(safeCity)}</text>
     </g>
 
     <g filter="url(#shadow)">
       <rect x="${titleCardX}" y="${heroCardY}" width="${titleCardWidth}" height="${heroCardHeight}" rx="32" fill="${palette.panel}" stroke="${palette.panelBorder}" />
-      <text x="${titleX}" y="210" text-anchor="${titleAnchor}" font-size="17" font-weight="700" fill="${palette.accent}" font-family="Rubik, sans-serif">${escapeXml(copy.bestOffers)}</text>
-      <text x="${titleX}" y="260" text-anchor="${titleAnchor}" font-size="38" font-weight="800" fill="${palette.text}" font-family="Rubik, sans-serif">${escapeXml(productLines[0] || '')}</text>
-      ${productLines[1] ? `<text x="${titleX}" y="304" text-anchor="${titleAnchor}" font-size="38" font-weight="800" fill="${palette.text}" font-family="Rubik, sans-serif">${escapeXml(productLines[1])}</text>` : ''}
-      <text x="${titleX}" y="346" text-anchor="${titleAnchor}" font-size="24" font-weight="600" fill="${palette.muted}" font-family="Rubik, sans-serif">${escapeXml(manufacturer)}</text>
+      <text x="${titleX}" y="236" text-anchor="${titleAnchor}" font-size="17" font-weight="700" fill="${palette.accent}" font-family="Rubik, sans-serif">${escapeXml(copy.bestOffers)}</text>
+      <text x="${titleX}" y="286" text-anchor="${titleAnchor}" font-size="38" font-weight="800" fill="${palette.text}" font-family="Rubik, sans-serif">${escapeXml(productLines[0] || '')}</text>
+      ${productLines[1] ? `<text x="${titleX}" y="330" text-anchor="${titleAnchor}" font-size="38" font-weight="800" fill="${palette.text}" font-family="Rubik, sans-serif">${escapeXml(productLines[1])}</text>` : ''}
+      <text x="${titleX}" y="372" text-anchor="${titleAnchor}" font-size="24" font-weight="600" fill="${palette.muted}" font-family="Rubik, sans-serif">${escapeXml(manufacturer)}</text>
 
       <rect x="${imageCardX}" y="${heroCardY}" width="${imageCardWidth}" height="${heroCardHeight}" rx="32" fill="rgba(255,255,255,0.98)" stroke="${palette.panelBorder}" />
       ${productImageMarkup}
