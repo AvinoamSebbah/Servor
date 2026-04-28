@@ -117,6 +117,7 @@ const CHAIN_ID_SLUG_MAP: Record<string, string> = {
 
 const FILE_CACHE = new Map<string, string | null>();
 const REMOTE_TEXT_CACHE = new Map<string, string | null>();
+const PUBLIC_FRONTEND_BASE_URL = 'https://agali.live';
 
 function escapeXml(value: string): string {
   return value
@@ -468,10 +469,8 @@ export async function getProductShareMeta(
   const offers = await Promise.all(
     topChainOffers.map(async (offer) => {
       const slug = resolveChainSlug(offer.chainName, offer.chainId);
-      const logoPath = slug
-        ? path.resolve(__dirname, '../../../web-frontend/public/images/stores', `${slug}.jpg`)
-        : '';
-      const logoDataUri = slug ? await readFileDataUri(logoPath, 'image/jpeg') : null;
+      const logoUrl = slug ? `${PUBLIC_FRONTEND_BASE_URL}/images/stores/${slug}.jpg` : '';
+      const logoDataUri = slug ? await fetchDataUri(logoUrl) : null;
       return { ...offer, logoDataUri };
     })
   );
@@ -494,9 +493,7 @@ export async function generateProductShareImage(
   const palette = getThemePalette(theme);
   const copy = getCopy(lang);
   const meta = await getProductShareMeta(prisma, barcode, city);
-  const logoPath = path.resolve(__dirname, '../../../web-frontend/src/assets/logo.png');
-  const logoDataUri = await readFileDataUri(logoPath, 'image/png');
-  const embeddedFontCss = await buildEmbeddedFontCss();
+  const logoDataUri = await fetchDataUri(`${PUBLIC_FRONTEND_BASE_URL}/logo.png`);
   const productImageCandidates = [
     `https://m.pricez.co.il/ProductPictures/200x/${encodeURIComponent(barcode)}.jpg`,
     `https://res.cloudinary.com/dprve5nst/image/upload/w_360,h_360,c_pad,b_white/products/${encodeURIComponent(barcode)}.jpg`,
@@ -588,9 +585,6 @@ export async function generateProductShareImage(
   const svg = `
   <svg width="${SHARE_IMAGE_WIDTH}" height="${SHARE_IMAGE_HEIGHT}" viewBox="0 0 ${SHARE_IMAGE_WIDTH} ${SHARE_IMAGE_HEIGHT}" xmlns="http://www.w3.org/2000/svg">
     <defs>
-      <style>
-        ${embeddedFontCss}
-      </style>
       <linearGradient id="bg" x1="0" y1="0" x2="${SHARE_IMAGE_WIDTH}" y2="${SHARE_IMAGE_HEIGHT}" gradientUnits="userSpaceOnUse">
         <stop stop-color="${palette.bgStart}" />
         <stop offset="1" stop-color="${palette.bgEnd}" />
@@ -641,6 +635,10 @@ export async function generateProductShareImage(
     fitTo: {
       mode: 'width',
       value: SHARE_IMAGE_WIDTH,
+    },
+    font: {
+      loadSystemFonts: true,
+      defaultFontFamily: 'Noto Sans',
     },
   });
 

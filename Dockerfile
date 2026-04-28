@@ -6,7 +6,7 @@ ENV PNPM_HOME="/pnpm"
 ENV PATH="$PNPM_HOME:$PATH"
 RUN corepack enable
 RUN apt-get update \
-	&& apt-get install -y --no-install-recommends openssl ca-certificates \
+	&& apt-get install -y --no-install-recommends openssl ca-certificates fontconfig fonts-dejavu-core fonts-noto-core \
 	&& rm -rf /var/lib/apt/lists/*
 
 FROM base AS deps
@@ -27,7 +27,7 @@ FROM node:20-bookworm-slim AS runtime
 WORKDIR /app
 ENV NODE_ENV=production
 RUN apt-get update \
-	&& apt-get install -y --no-install-recommends openssl ca-certificates \
+	&& apt-get install -y --no-install-recommends openssl ca-certificates fontconfig fonts-dejavu-core fonts-noto-core \
 	&& rm -rf /var/lib/apt/lists/*
 
 COPY --from=build /app/node_modules ./node_modules
