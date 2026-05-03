@@ -3,11 +3,22 @@ import axios from 'axios';
 import https from 'https';
 
 const router = Router();
+const GOOGLE_TRANSLATE_API = 'https://translation.googleapis.com/language/translate/v2';
+const translationCache = new Map<string, TranslationResponse>();
 
-const TRANSLATE_API = 'https://translate.agali.live/translate';
+type TranslationResponse = {
+  translatedText: string;
+  detectedSourceLanguage?: string;
+  cached?: boolean;
+};
 
-// Agent that skips certificate revocation check (needed on some Windows environments)
-const httpsAgent = new https.Agent({ rejectUnauthorized: false });
+function getCacheKey(q: string, source: string, target: string) {
+  return JSON.stringify({
+    q: q.trim(),
+    source: source.trim().toLowerCase() || 'auto',
+    target: target.trim().toLowerCase(),
+  });
+}
 
 router.post('/', async (req, res) => {
   const { q, source = 'auto', target = 'he' } = req.body as {
@@ -20,13 +31,59 @@ router.post('/', async (req, res) => {
     return res.status(400).json({ error: 'q is required' });
   }
 
+  const apiKey = process.env.GOOGLE_TRANSLATE_API_KEY;
+  if (!apiKey) {
+    return res.status(500).json({ error: 'Missing GOOGLE_TRANSLATE_API_KEY' });
+  }
+
+  const googleTranslateHttpsAgent = new https.Agent({
+    rejectUnauthorized: process.env.GOOGLE_TRANSLATE_STRICT_TLS !== 'false',
+  });
+
+  const normalizedQuery = q.trim();
+  const normalizedSource = typeof source === 'string' ? source : 'auto';
+  const normalizedTarget = typeof target === 'string' && target.trim() ? target.trim() : 'he';
+  const cacheKey = getCacheKey(normalizedQuery, normalizedSource, normalizedTarget);
+  const cachedTranslation = translationCache.get(cacheKey);
+
+  if (cachedTranslation) {
+    return res.json({ ...cachedTranslation, cached: true });
+  }
+
   try {
     const { data } = await axios.post(
-      TRANSLATE_API,
-      { q: q.trim(), source, target, format: 'text', api_key: '' },
-      { headers: { 'Content-Type': 'application/json' }, timeout: 5000, httpsAgent },
+      GOOGLE_TRANSLATE_API,
+      {
+        q: normalizedQuery,
+        target: normalizedTarget,
+        format: 'text',
+        ...(normalizedSource !== 'auto' ? { source: normalizedSource } : {}),
+      },
+      {
+        headers: { 'Content-Type': 'application/json' },
+        params: { key: apiKey },
+        timeout: 5000,
+        httpsAgent: googleTranslateHttpsAgent,
+      },
     );
-    return res.json(data);
+
+    const translation = data?.data?.translations?.[0];
+    const translatedText = translation?.translatedText;
+
+    if (typeof translatedText !== 'string' || !translatedText.trim()) {
+      return res.status(502).json({ error: 'Invalid translation response' });
+    }
+
+    const responseBody: TranslationResponse = {
+      translatedText: translatedText.trim(),
+      detectedSourceLanguage: typeof translation?.detectedSourceLanguage === 'string'
+        ? translation.detectedSourceLanguage
+        : undefined,
+    };
+
+    translationCache.set(cacheKey, responseBody);
+
+    return res.json({ ...responseBody, cached: false });
   } catch (err: any) {
     const status = err?.response?.status;
     if (status) {

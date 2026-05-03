@@ -20,23 +20,37 @@ dotenv.config();
 
 const app = express();
 const PORT = process.env.PORT || 3001;
+const allowedOrigins = (process.env.CORS_ALLOWED_ORIGINS || process.env.FRONTEND_URL || '')
+  .split(',')
+  .map((origin) => origin.trim())
+  .filter(Boolean);
 
-// ─── CORS: set headers on EVERY response, before all other middleware ─────────
-// This ensures CORS headers are present even on error responses (403, 500, etc.)
-app.use((req, res, next) => {
-  const origin = req.headers.origin;
-  if (origin) res.setHeader('Access-Control-Allow-Origin', origin);
-  res.setHeader('Access-Control-Allow-Credentials', 'true');
-  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type,Authorization,X-Requested-With');
-  res.setHeader('Vary', 'Origin');
-  if (req.method === 'OPTIONS') return res.status(204).end();
-  next();
-});
+function isAllowedOrigin(origin: string) {
+  if (allowedOrigins.includes(origin)) {
+    return true;
+  }
 
-// CORS — allow Vercel frontend + local dev
+  if (process.env.NODE_ENV !== 'production') {
+    return /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin);
+  }
+
+  return false;
+}
+
 app.use(cors({
-  origin: true,
+  origin(origin, callback) {
+    if (!origin) {
+      callback(null, true);
+      return;
+    }
+
+    if (isAllowedOrigin(origin)) {
+      callback(null, true);
+      return;
+    }
+
+    callback(new Error('CORS origin not allowed'));
+  },
   credentials: true,
 }));
 app.use(express.json());
@@ -71,6 +85,7 @@ app.use('/api/auth', authRouter);
 app.use('/api/user', userRouter);
 app.use('/api/observations', observationsRouter);
 app.use('/share', shareRouter);
+app.use('/translate', translateRouter);
 app.use('/api/translate', translateRouter);
 
 // Health check
