@@ -147,7 +147,7 @@ const ALCOHOL_BLOCKLIST_PATTERNS: RegExp[] = [
   /scotch/i, /champagne/i, /liqueur/i, /liquor/i, /cognac/i, /brandy/i,
   /cigarette/i, /tobacco/i, /(?<![a-z])cigar(?![a-z])/i,
 ];
-const PROMOTIONS_MAX_SCANNED_ROWS = 2000; // kept for hasMore calculation
+const PROMOTIONS_MAX_SCANNED_ROWS = 5000; // leave room for chain/city aggregation across many stores
 let topPromotionsPrewarmPromise: Promise<void> | null = null;
 
 // In-memory cache for chain/store filter data (stable, changes only when scrapor runs)
@@ -187,7 +187,7 @@ function setCachedPromoResult(key: string, all: TopPromotionDto[], sourceExhaust
   promotionsResultCache.set(key, { all, sourceExhausted, expiresAt: Date.now() + PROMOTIONS_RESULT_CACHE_TTL_MS });
 }
 
-function ensureTopPromotionsCachePrewarm(windowHours = 24, topN = 200): Promise<void> {
+function ensureTopPromotionsCachePrewarm(windowHours = 0, topN = 300): Promise<void> {
   if (!topPromotionsPrewarmPromise) {
     topPromotionsPrewarmPromise = prisma
       .$queryRaw(Prisma.sql`
@@ -557,7 +557,7 @@ router.get('/top-promotions', async (req, res) => {
     const chainName = typeof req.query.chainName === 'string' ? req.query.chainName.trim() : '';
     const storeId = typeof req.query.storeId === 'string' ? req.query.storeId.trim() : '';
     const includeConditionalPromos = parseBooleanQuery(req.query.includeConditional, false);
-    const windowHours = parseWindowHours(req.query.windowHours, 24, 720);
+    const windowHours = parseWindowHours(req.query.windowHours, 0, 720);
     const limit = parseLimit(req.query.limit, 50, 100);
     const offset = parseOffset(req.query.offset, 0);
     const isFirstPage = offset === 0;
@@ -612,18 +612,14 @@ router.get('/top-promotions', async (req, res) => {
             AND (${storeIdParam}::text IS NULL OR c.store_id = ${storeIdParam}::text)
             AND (${chainNameParam}::text IS NULL OR lower(c.chain_name) = lower(${chainNameParam}::text))
         ),
-        best_per_item AS (
-          SELECT DISTINCT ON (item_code) *
-          FROM candidates
-          ORDER BY item_code, smart_score DESC NULLS LAST, rank_position ASC
-        )
-        SELECT * FROM best_per_item
+        SELECT *
+        FROM candidates
         ORDER BY
           CASE WHEN ${sortBy} = 'percent' THEN discount_percent END DESC NULLS LAST,
           CASE WHEN ${sortBy} = 'savings' THEN discount_amount END DESC NULLS LAST,
           smart_score DESC NULLS LAST,
           rank_position ASC
-        LIMIT 2000
+        LIMIT ${PROMOTIONS_MAX_SCANNED_ROWS}
       `);
     };
 
@@ -647,13 +643,13 @@ router.get('/top-promotions', async (req, res) => {
       // Cold-start safeguard: if cache is empty, prewarm and retry once.
       if (allRows.length === 0) {
         const tWarmup = process.hrtime.bigint();
-        await ensureTopPromotionsCachePrewarm(windowHours, 200);
+        await ensureTopPromotionsCachePrewarm(windowHours, 300);
         timingsMs.cacheWarmupSql = elapsedMs(tWarmup);
         allRows = await fetchAllPromotionRows();
       }
 
       scannedRows = allRows.length;
-      sourceExhausted = allRows.length < 2000;
+      sourceExhausted = allRows.length < PROMOTIONS_MAX_SCANNED_ROWS;
 
       for (const promo of allRows.map(mapTopPromotionRow)) {
         if (!isValidTopPromotion(promo)) continue;
