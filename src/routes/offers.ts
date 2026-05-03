@@ -147,7 +147,7 @@ const ALCOHOL_BLOCKLIST_PATTERNS: RegExp[] = [
   /scotch/i, /champagne/i, /liqueur/i, /liquor/i, /cognac/i, /brandy/i,
   /cigarette/i, /tobacco/i, /(?<![a-z])cigar(?![a-z])/i,
 ];
-const PROMOTIONS_MAX_SCANNED_ROWS = 5000; // leave room for chain/city aggregation across many stores
+const PROMOTIONS_MAX_SCANNED_ROWS = 2000; // kept for hasMore calculation
 let topPromotionsPrewarmPromise: Promise<void> | null = null;
 
 // In-memory cache for chain/store filter data (stable, changes only when scrapor runs)
@@ -612,14 +612,18 @@ router.get('/top-promotions', async (req, res) => {
             AND (${storeIdParam}::text IS NULL OR c.store_id = ${storeIdParam}::text)
             AND (${chainNameParam}::text IS NULL OR lower(c.chain_name) = lower(${chainNameParam}::text))
         ),
-        SELECT *
-        FROM candidates
+        best_per_item AS (
+          SELECT DISTINCT ON (item_code) *
+          FROM candidates
+          ORDER BY item_code, smart_score DESC NULLS LAST, rank_position ASC
+        )
+        SELECT * FROM best_per_item
         ORDER BY
           CASE WHEN ${sortBy} = 'percent' THEN discount_percent END DESC NULLS LAST,
           CASE WHEN ${sortBy} = 'savings' THEN discount_amount END DESC NULLS LAST,
           smart_score DESC NULLS LAST,
           rank_position ASC
-        LIMIT ${PROMOTIONS_MAX_SCANNED_ROWS}
+        LIMIT 2000
       `);
     };
 
@@ -649,7 +653,7 @@ router.get('/top-promotions', async (req, res) => {
       }
 
       scannedRows = allRows.length;
-      sourceExhausted = allRows.length < PROMOTIONS_MAX_SCANNED_ROWS;
+      sourceExhausted = allRows.length < 2000;
 
       for (const promo of allRows.map(mapTopPromotionRow)) {
         if (!isValidTopPromotion(promo)) continue;
@@ -1022,13 +1026,13 @@ router.delete('/store-promos/item/:itemCode', async (req, res) => {
   try {
     const itemCode = req.params.itemCode;
     if (!itemCode) return res.status(400).json({ error: 'itemCode required' });
-    
+
     // On efface l'item de la table de cache de promotions
     const deleteRes = await prisma.$executeRaw(Prisma.sql`
       DELETE FROM public.store_promotions_cache
       WHERE item_code = ${itemCode}::varchar
     `);
-    
+
     console.info(`[DELETE store-promos/item] Removed ${deleteRes} rows for ${itemCode} in ${elapsedMs(tStart)}ms`);
     return res.json({ success: true, removedRows: deleteRes });
   } catch (error) {
