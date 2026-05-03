@@ -260,6 +260,11 @@ function isValidTopPromotion(promo: TopPromotionDto): boolean {
   return effectivePrice < basePrice;
 }
 
+function shouldHidePromoWhenConditionalFilterOff(promo: TopPromotionDto): boolean {
+  const kind = (promo.promoKind || '').trim().toLowerCase();
+  return kind === 'coupon' || kind === 'club' || kind === 'card' || kind === 'insurance';
+}
+
 function normalizeProductName(value: string | null | undefined): string {
   return (value || '')
     .trim()
@@ -652,7 +657,7 @@ router.get('/top-promotions', async (req, res) => {
 
       for (const promo of allRows.map(mapTopPromotionRow)) {
         if (!isValidTopPromotion(promo)) continue;
-        if (!includeConditionalPromos && promo.isConditionalPromo) continue;
+        if (!includeConditionalPromos && shouldHidePromoWhenConditionalFilterOff(promo)) continue;
 
         const dedupeKey = buildTopPromotionDedupeKey(promo);
         if (seenPromotionKeys.has(dedupeKey)) continue;

@@ -56,7 +56,8 @@ router.post('/', async (req, res) => {
         ${city || null}::text,
         NULL::text,
         ${50}::integer,
-        0::integer
+        0::integer,
+        NULL::text
       ) o
       LEFT JOIN LATERAL (
         SELECT chain_name FROM stores WHERE chain_id = o.chain_id AND store_id = o.store_id LIMIT 1

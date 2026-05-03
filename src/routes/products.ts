@@ -107,7 +107,8 @@ router.get('/search', async (req, res) => {
                 ${city || null}::text,
                 ${chainId || null}::text,
                 1::integer,
-                0::integer
+                0::integer,
+                NULL::text
               ) o
             )
           ORDER BY chain_count DESC NULLS LAST, rank DESC NULLS LAST, item_code ASC
@@ -156,7 +157,8 @@ router.get('/search', async (req, res) => {
           ${city || null}::text,
           ${chainId || null}::text,
           ${detailsLimit}::integer,
-          0::integer
+          0::integer,
+          NULL::text
         ) o
         LEFT JOIN LATERAL (
           SELECT chain_name FROM stores WHERE chain_id = o.chain_id AND store_id = o.store_id LIMIT 1
@@ -1298,7 +1300,8 @@ router.get('/:barcode', async (req, res) => {
         ${cityText || null}::text,
         NULL::text,
         300::integer,
-        0::integer
+        0::integer,
+        NULL::text
       ) o
       LEFT JOIN LATERAL (
         SELECT chain_name FROM stores WHERE chain_id = o.chain_id AND store_id = o.store_id LIMIT 1
