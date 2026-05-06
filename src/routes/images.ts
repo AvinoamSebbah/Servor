@@ -325,7 +325,7 @@ router.get('/catalog-image/:id', (req, res) => {
     return res.status(404).json({ error: 'Catalog image not found' });
   }
 
-  res.setHeader('Cache-Control', 'public, max-age=300');
+  res.setHeader('Cache-Control', 'public, max-age=86400');
   return res.redirect(302, imageUrl);
 });
 
@@ -355,7 +355,7 @@ router.post('/catalog-images/batch', (req, res) => {
       }),
   );
 
-  res.setHeader('Cache-Control', 'public, max-age=300');
+  res.setHeader('Cache-Control', 'public, max-age=86400');
   return res.json({ images });
 });
 
