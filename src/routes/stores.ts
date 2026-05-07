@@ -4,6 +4,68 @@ import { PrismaClient, Prisma } from '@prisma/client';
 const router = Router();
 const prisma = new PrismaClient();
 
+router.get('/filters', async (req, res) => {
+  try {
+    const city = typeof req.query.city === 'string' ? req.query.city.trim() : '';
+    const chainId = typeof req.query.chainId === 'string' ? req.query.chainId.trim() : '';
+
+    type ChainFilterRow = {
+      chain_id: string;
+      chain_name: string;
+    };
+
+    type StoreFilterRow = {
+      chain_id: string;
+      chain_name: string;
+      store_id: string;
+      store_name: string;
+      city: string | null;
+    };
+
+    const [chainRows, storeRows] = await Promise.all([
+      prisma.$queryRaw<ChainFilterRow[]>(Prisma.sql`
+        SELECT DISTINCT
+          s.chain_id,
+          COALESCE(NULLIF(s.chain_name, ''), s.chain_id)::text AS chain_name
+        FROM stores s
+        WHERE (${city || null}::text IS NULL OR s.city ILIKE ${city || null}::text || '%')
+        ORDER BY chain_name ASC
+        LIMIT 100
+      `),
+      prisma.$queryRaw<StoreFilterRow[]>(Prisma.sql`
+        SELECT
+          s.chain_id,
+          COALESCE(NULLIF(s.chain_name, ''), s.chain_id)::text AS chain_name,
+          s.store_id,
+          COALESCE(NULLIF(s.store_name, ''), s.store_id)::text AS store_name,
+          s.city::text AS city
+        FROM stores s
+        WHERE (${city || null}::text IS NULL OR s.city ILIKE ${city || null}::text || '%')
+          AND (${chainId || null}::text IS NULL OR s.chain_id = ${chainId || null}::text)
+        ORDER BY chain_name ASC, store_name ASC
+        LIMIT 500
+      `),
+    ]);
+
+    return res.json({
+      chains: chainRows.map((row) => ({
+        chainId: row.chain_id,
+        chainName: row.chain_name,
+      })),
+      stores: storeRows.map((row) => ({
+        chainId: row.chain_id,
+        chainName: row.chain_name,
+        storeId: row.store_id,
+        storeName: row.store_name,
+        city: row.city,
+      })),
+    });
+  } catch (error) {
+    console.error('Store filters fetch error:', error);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 
 // GET /api/stores/chain/:chainId - list stores for a chain
 router.get('/chain/:chainId', async (req, res) => {

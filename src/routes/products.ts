@@ -61,6 +61,7 @@ router.get('/search', async (req, res) => {
     const query = typeof req.query.q === 'string' ? req.query.q.trim() : '';
     const city = typeof req.query.city === 'string' ? req.query.city.trim() : '';
     const chainId = typeof req.query.chainId === 'string' ? req.query.chainId.trim() : '';
+    const storeId = typeof req.query.storeId === 'string' ? req.query.storeId.trim() : '';
     const includeDetailsRaw = typeof req.query.includeDetails === 'string'
       ? req.query.includeDetails.trim().toLowerCase()
       : '';
@@ -74,15 +75,29 @@ router.get('/search', async (req, res) => {
     const offsetRaw = Number.parseInt(String(req.query.offset ?? '0'), 10);
     const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? Math.min(limitRaw, 100) : 10;
     const offset = Number.isFinite(offsetRaw) && offsetRaw >= 0 ? offsetRaw : 0;
-    const candidateMultiplier = 8;
-    const candidateLimit = Math.min(Math.max(limit * candidateMultiplier, 50), 400);
+    const candidateMultiplier = includeDetails ? 6 : 14;
+    const candidateLimit = Math.min(Math.max(limit * candidateMultiplier, 60), 240);
+    const detailCandidateLimit = includeDetails
+      ? Math.min(Math.max(limit * 3, 20), Math.max(limit, candidateLimit))
+      : 0;
 
     if (!query) {
       return res.status(400).json({ error: 'q is required' });
     }
 
+    const searchCacheKey = `search|${query.toLowerCase()}|${city.toLowerCase()}|${chainId}|${storeId}|${includeDetails}|${detailsLimit}|${limit}|${offset}`;
+    if (!includeDetails) {
+      const cachedSearch = searchResponseCache.get(searchCacheKey);
+      if (cachedSearch && cachedSearch.expiresAt > Date.now()) {
+        res.setHeader('X-Search-Cache', 'HIT');
+        return res.json(cachedSearch.payload);
+      }
+      res.setHeader('X-Search-Cache', 'MISS');
+    }
+
 
     type SearchProductRow = {
+      product_id: number;
       item_code: string;
       item_name: string | null;
       manufacturer_name: string | null;
@@ -91,45 +106,113 @@ router.get('/search', async (req, res) => {
     };
 
     const tSearchSql = process.hrtime.bigint();
-    const rows = includeDetails
-      ? await prisma.$queryRaw<SearchProductRow[]>(Prisma.sql`
-          SELECT
-            item_code,
-            item_name,
-            manufacturer_name,
-            rank,
-            chain_count
-          FROM public.search_products_fts(${query}::text, ${candidateLimit}::integer, ${offset}::integer)
-          WHERE EXISTS (
-              SELECT 1
-              FROM public.get_offers_for_item_code(
-                item_code,
-                ${city || null}::text,
-                ${chainId || null}::text,
-                1::integer,
-                0::integer,
-                NULL::text
-              ) o
-            )
-          ORDER BY chain_count DESC NULLS LAST, rank DESC NULLS LAST, item_code ASC
-          LIMIT ${limit}::integer
-        `)
-      : await prisma.$queryRaw<SearchProductRow[]>(Prisma.sql`
-          SELECT
-            item_code,
-            item_name,
-            manufacturer_name,
-            rank,
-            chain_count
-          FROM public.search_products_fts(${query}::text, ${limit}::integer, ${offset}::integer)
-          ORDER BY chain_count DESC NULLS LAST, rank DESC NULLS LAST, item_code ASC
-        `);
+    let rows = await prisma.$queryRaw<SearchProductRow[]>(Prisma.sql`
+      WITH params AS (
+        SELECT
+          ${query}::text AS raw_query,
+          websearch_to_tsquery('simple', ${query}::text) AS tsq
+      ),
+      matched AS (
+        SELECT
+          p.id AS product_id,
+          p.item_code,
+          p.item_name,
+          p.manufacturer_name,
+          (
+            ts_rank(p.search_idx_col, params.tsq)
+            + CASE
+                WHEN lower(COALESCE(p.item_name, '')) = lower(params.raw_query) THEN 10
+                WHEN lower(COALESCE(p.item_name, '')) LIKE lower(params.raw_query) || '%' THEN 6
+                WHEN lower(COALESCE(p.item_name, '')) LIKE '% ' || lower(params.raw_query) || '%' THEN 3
+                ELSE 0
+              END
+            + CASE
+                WHEN lower(COALESCE(p.manufacturer_name, '')) LIKE lower(params.raw_query) || '%' THEN 0.4
+                ELSE 0
+              END
+            + (LEAST(COALESCE(pss.chain_count, 0), 20) * 0.015)
+          )::real AS rank,
+          COALESCE(pss.chain_count, 0)::integer AS chain_count
+        FROM products p
+        CROSS JOIN params
+        LEFT JOIN product_search_stats pss ON pss.product_id = p.id
+        WHERE COALESCE(${query}::text, '') <> ''
+          AND p.search_idx_col @@ params.tsq
+      )
+      SELECT
+        product_id,
+        item_code,
+        item_name,
+        manufacturer_name,
+        rank,
+        chain_count
+      FROM matched
+      ORDER BY rank DESC NULLS LAST, chain_count DESC NULLS LAST, item_code ASC
+      LIMIT ${candidateLimit}::integer
+      OFFSET ${offset}::integer
+    `);
     timingsMs.searchSql = elapsedMs(tSearchSql);
 
+    if (rows.length < limit && query.length >= 2) {
+      const existingProductIds = rows.map((row) => row.product_id);
+      const tFallbackSql = process.hrtime.bigint();
+      const fallbackRows = await prisma.$queryRaw<SearchProductRow[]>(Prisma.sql`
+        WITH params AS (
+          SELECT
+            ${query}::text AS raw_query,
+            regexp_replace(${query}::text, '\s+', '', 'g') AS compact_query
+        )
+        SELECT
+          p.id AS product_id,
+          p.item_code,
+          p.item_name,
+          p.manufacturer_name,
+          (
+            GREATEST(
+              similarity(COALESCE(p.item_name, ''), params.raw_query),
+              similarity(COALESCE(p.manufacturer_name, ''), params.raw_query),
+              similarity(regexp_replace(COALESCE(p.item_name, ''), '\s+', '', 'g'), params.compact_query),
+              word_similarity(params.raw_query, COALESCE(p.item_name, '')),
+              word_similarity(params.raw_query, COALESCE(p.manufacturer_name, ''))
+            ) * 3.5
+            + CASE
+                WHEN lower(COALESCE(p.item_name, '')) LIKE lower(params.raw_query) || '%' THEN 2
+                ELSE 0
+              END
+            + (LEAST(COALESCE(pss.chain_count, 0), 20) * 0.01)
+          )::real AS rank,
+          COALESCE(pss.chain_count, 0)::integer AS chain_count
+        FROM products p
+        CROSS JOIN params
+        LEFT JOIN product_search_stats pss ON pss.product_id = p.id
+        WHERE (
+            COALESCE(p.item_name, '') % params.raw_query
+            OR COALESCE(p.manufacturer_name, '') % params.raw_query
+            OR word_similarity(params.raw_query, COALESCE(p.item_name, '')) >= 0.22
+            OR word_similarity(params.raw_query, COALESCE(p.manufacturer_name, '')) >= 0.22
+            OR similarity(regexp_replace(COALESCE(p.item_name, ''), '\s+', '', 'g'), params.compact_query) >= 0.18
+          )
+          ${existingProductIds.length > 0
+            ? Prisma.sql`AND p.id <> ALL(${existingProductIds}::int[])`
+            : Prisma.empty}
+        ORDER BY rank DESC NULLS LAST, chain_count DESC NULLS LAST, p.item_code ASC
+        LIMIT ${Math.min(limit * 2, 30)}::integer
+      `);
+      rows = [...rows, ...fallbackRows];
+      timingsMs.fallbackSql = elapsedMs(tFallbackSql);
+    }
+
     const detailsByItemCode = new Map<string, ReturnType<typeof mapOffersToLegacyDetails>>();
+    const summaryByItemCode = new Map<string, {
+      minPrice: number | null;
+      effectivePrice: number | null;
+      hasPromo: boolean;
+      availableChains: string[];
+    }>();
 
     if (includeDetails && rows.length > 0) {
-      const itemCodes = rows.map((row) => row.item_code);
+      const detailRows = rows.slice(0, detailCandidateLimit || rows.length);
+      const itemCodes = detailRows.map((row) => row.item_code);
       const tOffersSql = process.hrtime.bigint();
       const offersRows = await prisma.$queryRaw<RawOfferRow[]>(Prisma.sql`
         WITH input_codes AS (
@@ -163,6 +246,7 @@ router.get('/search', async (req, res) => {
         LEFT JOIN LATERAL (
           SELECT chain_name FROM stores WHERE chain_id = o.chain_id AND store_id = o.store_id LIMIT 1
         ) s_name ON true
+        WHERE (${storeId || null}::text IS NULL OR o.store_id = ${storeId || null}::text)
         ORDER BY o.item_code ASC, o.effective_price ASC NULLS LAST, o.updated_at DESC NULLS LAST, o.store_id ASC
       `);
       timingsMs.offersSql = elapsedMs(tOffersSql);
@@ -187,10 +271,93 @@ router.get('/search', async (req, res) => {
         detailsByItemCode.set(itemCode, mapOffersToLegacyDetails(offers));
       }
       timingsMs.detailsMap = elapsedMs(tGroupMap);
+    } else if (rows.length > 0) {
+      type SearchSummaryRow = {
+        product_id: number;
+        item_code: string;
+        chain_name: string | null;
+        min_price: Prisma.Decimal | null;
+        min_effective_price: Prisma.Decimal | null;
+        has_promo: boolean | null;
+      };
+
+      const productIds = rows.map((row) => row.product_id);
+      const tSummarySql = process.hrtime.bigint();
+      const summaryRows = await prisma.$queryRaw<SearchSummaryRow[]>(Prisma.sql`
+        WITH selected_products AS (
+          SELECT unnest(${productIds}::int[]) AS product_id
+        ),
+        priced_rows AS (
+          SELECT
+            sp.product_id,
+            p.item_code,
+            COALESCE(NULLIF(s.chain_name, ''), s.chain_id)::text AS chain_name,
+            pp.price,
+            LEAST(pp.price, COALESCE(pb.promo_price, pp.promo_price, pp.price)) AS effective_price,
+            (
+              COALESCE(pb.promo_price, pp.promo_price) IS NOT NULL
+              AND COALESCE(pb.promo_price, pp.promo_price) < pp.price
+              AND COALESCE(pb.promo_price, pp.promo_price) >= (pp.price * 0.05)
+            ) AS has_promo
+          FROM selected_products sp
+          JOIN products p ON p.id = sp.product_id
+          JOIN product_prices pp ON pp.product_id = sp.product_id
+          JOIN stores s ON s.id = pp.store_id
+          LEFT JOIN LATERAL (
+            SELECT MIN(psi.promo_price) AS promo_price
+            FROM promotion_store_items psi
+            WHERE psi.product_id = pp.product_id
+              AND psi.store_id = pp.store_id
+              AND psi.promo_price IS NOT NULL
+              AND (psi.promotion_end_date IS NULL OR psi.promotion_end_date >= CURRENT_DATE)
+          ) pb ON TRUE
+          WHERE pp.price IS NOT NULL
+            AND (${city || null}::text IS NULL OR s.city ILIKE ${city || null}::text || '%')
+            AND (${chainId || null}::text IS NULL OR s.chain_id = ${chainId || null}::text)
+            AND (${storeId || null}::text IS NULL OR s.store_id = ${storeId || null}::text)
+        )
+        SELECT
+          product_id,
+          item_code,
+          chain_name,
+          MIN(price) AS min_price,
+          MIN(effective_price) AS min_effective_price,
+          BOOL_OR(has_promo) AS has_promo
+        FROM priced_rows
+        GROUP BY product_id, item_code, chain_name
+      `);
+      timingsMs.summarySql = elapsedMs(tSummarySql);
+
+      for (const row of summaryRows) {
+        const existing = summaryByItemCode.get(row.item_code);
+        const nextMinPrice = row.min_price !== null ? Number(row.min_price) : null;
+        const nextEffectivePrice = row.min_effective_price !== null ? Number(row.min_effective_price) : null;
+
+        if (!existing) {
+          summaryByItemCode.set(row.item_code, {
+            minPrice: nextMinPrice,
+            effectivePrice: nextEffectivePrice,
+            hasPromo: Boolean(row.has_promo),
+            availableChains: row.chain_name ? [row.chain_name] : [],
+          });
+          continue;
+        }
+
+        if (nextMinPrice !== null && (existing.minPrice === null || nextMinPrice < existing.minPrice)) {
+          existing.minPrice = nextMinPrice;
+        }
+        if (nextEffectivePrice !== null && (existing.effectivePrice === null || nextEffectivePrice < existing.effectivePrice)) {
+          existing.effectivePrice = nextEffectivePrice;
+        }
+        existing.hasPromo = existing.hasPromo || Boolean(row.has_promo);
+        if (row.chain_name && !existing.availableChains.includes(row.chain_name)) {
+          existing.availableChains.push(row.chain_name);
+        }
+      }
     }
 
     const tResponseMap = process.hrtime.bigint();
-    const products = rows.map((row) => ({
+    const mappedProducts = rows.map((row) => ({
       imageUrl: getProductDeliveryUrl(row.item_code),
       ...(detailsByItemCode.get(row.item_code)
         ? {
@@ -205,10 +372,24 @@ router.get('/search', async (req, res) => {
               ? String(detailsByItemCode.get(row.item_code)!.bestEffectivePrice)
               : null,
           }
+        : summaryByItemCode.get(row.item_code)
+        ? {
+            prices: [],
+            promotions: [],
+            detailsLoaded: false,
+            hasPromo: summaryByItemCode.get(row.item_code)!.hasPromo,
+            minPrice: summaryByItemCode.get(row.item_code)!.minPrice !== null
+              ? String(summaryByItemCode.get(row.item_code)!.minPrice)
+              : null,
+            effectivePrice: summaryByItemCode.get(row.item_code)!.effectivePrice !== null
+              ? String(summaryByItemCode.get(row.item_code)!.effectivePrice)
+              : null,
+            availableChains: summaryByItemCode.get(row.item_code)!.availableChains,
+          }
         : {
             prices: [],
             promotions: [],
-            detailsLoaded: includeDetails,
+            detailsLoaded: false,
           }),
       itemCode: row.item_code,
       itemName: row.item_name,
@@ -217,7 +398,11 @@ router.get('/search', async (req, res) => {
       chainCount: row.chain_count,
     }));
 
-    const filteredProducts = products;
+    const filteredProducts = mappedProducts
+      .filter((product) => includeDetails
+        ? product.detailsLoaded && product.prices.length > 0
+        : summaryByItemCode.has(product.itemCode))
+      .slice(0, limit);
     timingsMs.responseMap = elapsedMs(tResponseMap);
     timingsMs.total = elapsedMs(tRouteStart);
     res.setHeader('Server-Timing', toServerTiming(timingsMs));
@@ -245,8 +430,10 @@ router.get('/search', async (req, res) => {
       query,
       city: city || null,
       chainId: chainId || null,
+      storeId: storeId || null,
       includeDetails,
       detailsLimit,
+      detailCandidateLimit,
       candidateLimit,
       limit,
       offset,
@@ -255,10 +442,19 @@ router.get('/search', async (req, res) => {
       timingsMs: safeTimingsMs,
     });
 
-    return res.json({
+    const payload = {
       products: safeJson(filteredProducts),
       pagination: safeJson(buildOffsetPagination(limit, offset, filteredProducts.length)),
-    });
+    };
+
+    if (!includeDetails) {
+      searchResponseCache.set(searchCacheKey, {
+        expiresAt: Date.now() + SEARCH_CACHE_TTL_MS,
+        payload,
+      });
+    }
+
+    return res.json(payload);
   } catch (error) {
     // Log détaillé pour diagnostiquer l'erreur Prisma
     if (error instanceof Error) {
@@ -651,142 +847,76 @@ router.get('/search/details', async (req, res) => {
   try {
     const itemCodes = parseItemCodesQuery(req.query.itemCodes);
     const cityText = typeof req.query.city === 'string' ? req.query.city.trim() : '';
+    const chainId = typeof req.query.chainId === 'string' ? req.query.chainId.trim() : '';
+    const storeId = typeof req.query.storeId === 'string' ? req.query.storeId.trim() : '';
     if (itemCodes.length === 0) {
       return res.json({ details: {} });
     }
 
-    const cityStoreIdStrings = cityText ? await getCityStoreIdsCached(cityText) : [];
-    const cityStoreIdNums = cityStoreIdStrings
-      .map(id => parseInt(id, 10))
-      .filter(n => !Number.isNaN(n));
-    const priceCityFilter = cityText
-      ? Prisma.sql`AND s.id = ANY(${cityStoreIdNums}::int[])`
-      : Prisma.empty;
-
-    type PriceExpandedRow = {
-      priceId: number;
-      chainId: string;
-      itemCode: string;
-      itemPrice: Prisma.Decimal;
-      basePrice: string | null;
-      priceUpdateDate: Date | null;
-      unitOfMeasure: string | null;
-      unitQty: string | null;
-      bIsWeighted: boolean | null;
-      storeDbId: number;
-      storeChainId: string;
-      storeId: string;
-      chainName: string | null;
-      storeName: string | null;
-      city: string | null;
-    };
-
-    const expandedAllPrices = await prisma.$queryRaw<PriceExpandedRow[]>(Prisma.sql`
+    const offersRows = await prisma.$queryRaw<RawOfferRow[]>(Prisma.sql`
+      WITH input_codes AS (
+        SELECT unnest(${itemCodes}::text[]) AS item_code
+      )
       SELECT
-        pr.id AS "priceId",
-        pr.chain_id AS "chainId",
-        pr.item_code AS "itemCode",
-        e.value::numeric AS "itemPrice",
-        pr.base_price AS "basePrice",
-        pr.price_update_date AS "priceUpdateDate",
-        pr.unit_of_measure AS "unitOfMeasure",
-        pr.unit_qty AS "unitQty",
-        pr.b_is_weighted AS "bIsWeighted",
-        s.id AS "storeDbId",
-        s.chain_id AS "storeChainId",
-        s.store_id AS "storeId",
-        s.chain_name AS "chainName",
-        s.store_name AS "storeName",
-        s.city AS "city"
-      FROM prices pr
-      CROSS JOIN LATERAL jsonb_each_text(pr.store_prices::jsonb) AS e(key, value)
-      JOIN stores s ON s.id = e.key::int
-      WHERE pr.item_code = ANY(${itemCodes})
-        AND e.key ~ '^[0-9]+$'
-        AND e.value ~ '^\\s*[0-9]+(\\.[0-9]+)?\\s*$'
-        ${priceCityFilter}
-      ORDER BY pr.price_update_date DESC NULLS LAST
+        o.item_code,
+        o.item_name,
+        o.manufacturer_name,
+        o.chain_id,
+        s_name.chain_name,
+        o.store_id,
+        o.store_name,
+        o.city,
+        o.price,
+        o.promo_price,
+        o.effective_price,
+        o.unit_of_measure,
+        o.unit_qty,
+        o.b_is_weighted,
+        o.updated_at
+      FROM input_codes ic
+      CROSS JOIN LATERAL public.get_offers_for_item_code(
+        ic.item_code,
+        ${cityText || null}::text,
+        ${chainId || null}::text,
+        100::integer,
+        0::integer,
+        NULL::text
+      ) o
+      LEFT JOIN LATERAL (
+        SELECT chain_name FROM stores WHERE chain_id = o.chain_id AND store_id = o.store_id LIMIT 1
+      ) s_name ON true
+      WHERE (${storeId || null}::text IS NULL OR o.store_id = ${storeId || null}::text)
+      ORDER BY o.item_code ASC, o.effective_price ASC NULLS LAST, o.updated_at DESC NULLS LAST, o.store_id ASC
     `);
 
-    const pricesByItemCode = new Map<string, any[]>();
-    for (const pr of expandedAllPrices) {
-      const code = pr.itemCode;
-      if (!pricesByItemCode.has(code)) pricesByItemCode.set(code, []);
-      pricesByItemCode.get(code)!.push({
-        id: `${pr.priceId}-${pr.storeDbId}`,
-        priceRowId: pr.priceId,
-        chainId: pr.chainId,
-        itemCode: pr.itemCode,
-        itemPrice: pr.itemPrice.toString(),
-        basePrice: pr.basePrice,
-        priceUpdateDate: pr.priceUpdateDate,
-        unitOfMeasure: pr.unitOfMeasure,
-        unitQty: pr.unitQty,
-        bIsWeighted: pr.bIsWeighted,
-        store: {
-          id: pr.storeDbId,
-          chainId: pr.storeChainId,
-          storeId: pr.storeId,
-          chainName: pr.chainName,
-          storeName: pr.storeName,
-          city: pr.city,
-        },
-      });
-    }
+    const mappedOffers = await enrichApiOffersWithPromoContext(
+      prisma,
+      offersRows.map(mapOfferRow),
+    );
 
-    type PromoRow = {
-      id: number;
-      promotion_id: string;
-      promotion_description: string | null;
-      promotion_start_date: Date;
-      promotion_end_date: Date;
-      chain_id: string;
-      available_in_store_ids: string[];
-      discounted_price: string | null;
-      matched_item_code: string;
-    };
-
-    const now = new Date();
-    const promoCityFilter = cityText
-      ? Prisma.sql`AND p.available_in_store_ids && ${cityStoreIdStrings}::text[]`
-      : Prisma.empty;
-
-    const promoRows = await prisma.$queryRaw<PromoRow[]>(Prisma.sql`
-      SELECT DISTINCT ON (p.id, pi.item_code)
-             p.id,
-             p.promotion_id,
-             p.promotion_description,
-             p.promotion_start_date,
-             p.promotion_end_date,
-             p.chain_id,
-             p.available_in_store_ids,
-             COALESCE(p.discounted_price, pi.discounted_price::text) AS discounted_price,
-             pi.item_code AS matched_item_code
-      FROM promotions p
-      JOIN promotion_items pi ON pi.promotion_db_id = p.id
-      WHERE pi.item_code = ANY(${itemCodes})
-        AND p.promotion_start_date <= ${now}
-        AND p.promotion_end_date >= ${now}
-        AND (p.club_id IS NULL OR p.club_id != '2')
-        ${promoCityFilter}
-    `);
-
-    const promosByItemCode = new Map<string, PromoRow[]>();
-    for (const promo of promoRows) {
-      const code = promo.matched_item_code;
-      if (!promosByItemCode.has(code)) promosByItemCode.set(code, []);
-      promosByItemCode.get(code)!.push(promo);
+    const grouped = new Map<string, ReturnType<typeof mapOfferRow>[]>();
+    for (const mapped of mappedOffers) {
+      const existing = grouped.get(mapped.itemCode);
+      if (existing) {
+        existing.push(mapped);
+      } else {
+        grouped.set(mapped.itemCode, [mapped]);
+      }
     }
 
     const details = Object.fromEntries(
-      itemCodes.map(code => [
-        code,
-        {
-          prices: pricesByItemCode.get(code) ?? [],
-          promotions: promosByItemCode.get(code) ?? [],
+      itemCodes.map((code) => {
+        const groupedOffers = grouped.get(code) ?? [];
+        const mapped = mapOffersToLegacyDetails(groupedOffers);
+        return [code, {
+          prices: mapped.prices,
+          promotions: mapped.promotions,
           detailsLoaded: true,
-        },
-      ])
+          hasPromo: mapped.hasPromo,
+          minPrice: mapped.bestPrice !== null ? String(mapped.bestPrice) : null,
+          effectivePrice: mapped.bestEffectivePrice !== null ? String(mapped.bestEffectivePrice) : null,
+        }];
+      })
     );
 
     return res.json({ details });
