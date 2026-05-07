@@ -130,7 +130,8 @@ router.get('/search', async (req, res) => {
                 WHEN lower(COALESCE(p.manufacturer_name, '')) LIKE lower(params.raw_query) || '%' THEN 0.4
                 ELSE 0
               END
-            + (LEAST(COALESCE(pss.chain_count, 0), 20) * 0.015)
+            + (LN(1 + LEAST(COALESCE(pss.chain_count, 0), 40)) * 0.22)
+            + (LEAST(COALESCE(pss.chain_count, 0), 25) * 0.03)
           )::real AS rank,
           COALESCE(pss.chain_count, 0)::integer AS chain_count
         FROM products p
@@ -147,7 +148,7 @@ router.get('/search', async (req, res) => {
         rank,
         chain_count
       FROM matched
-      ORDER BY rank DESC NULLS LAST, chain_count DESC NULLS LAST, item_code ASC
+      ORDER BY chain_count DESC NULLS LAST, rank DESC NULLS LAST, item_code ASC
       LIMIT ${candidateLimit}::integer
       OFFSET ${offset}::integer
     `);
@@ -179,7 +180,8 @@ router.get('/search', async (req, res) => {
                 WHEN lower(COALESCE(p.item_name, '')) LIKE lower(params.raw_query) || '%' THEN 2
                 ELSE 0
               END
-            + (LEAST(COALESCE(pss.chain_count, 0), 20) * 0.01)
+            + (LN(1 + LEAST(COALESCE(pss.chain_count, 0), 40)) * 0.18)
+            + (LEAST(COALESCE(pss.chain_count, 0), 25) * 0.02)
           )::real AS rank,
           COALESCE(pss.chain_count, 0)::integer AS chain_count
         FROM products p
@@ -195,7 +197,7 @@ router.get('/search', async (req, res) => {
           ${existingProductIds.length > 0
             ? Prisma.sql`AND p.id <> ALL(${existingProductIds}::int[])`
             : Prisma.empty}
-        ORDER BY rank DESC NULLS LAST, chain_count DESC NULLS LAST, p.item_code ASC
+        ORDER BY chain_count DESC NULLS LAST, rank DESC NULLS LAST, p.item_code ASC
         LIMIT ${Math.min(limit * 2, 30)}::integer
       `);
       rows = [...rows, ...fallbackRows];

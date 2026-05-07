@@ -1,7 +1,13 @@
 import { Router } from 'express';
 import { Prisma, PrismaClient } from '@prisma/client';
 import { buildOffsetPagination, mapOfferRow, RawOfferRow, toNullableNumber } from '../services/offerMapping';
-import { buildPromoLookupKey, enrichApiOffersWithPromoContext, resolvePromoContexts } from '../services/promoContext';
+import {
+  buildPromoLookupKey,
+  classifyPromotionKind,
+  enrichApiOffersWithPromoContext,
+  RawPromoContextRow,
+  resolvePromoContexts,
+} from '../services/promoContext';
 import { getProductDeliveryUrl } from './images';
 
 const router = Router();
@@ -82,6 +88,33 @@ type RawTopPromotionRow = {
   is_conditional_promo: unknown;
 };
 
+type RawFullPromotionRow = {
+  item_code: string;
+  item_name: string | null;
+  manufacturer_name: string | null;
+  chain_id: string;
+  chain_name: string | null;
+  store_id: string;
+  store_name: string | null;
+  city: string | null;
+  unit_of_measure: string | null;
+  unit_qty: string | null;
+  b_is_weighted: unknown;
+  price: unknown;
+  promo_price: unknown;
+  effective_price: unknown;
+  discount_amount: unknown;
+  discount_percent: unknown;
+  smart_score: unknown;
+  promotion_end_date: Date | string | null;
+  updated_at: Date | string | null;
+  promotion_id: string | null;
+  promotion_description: string | null;
+  additional_is_coupon: string | null;
+  additional_restrictions: string | null;
+  club_id: string | null;
+};
+
 type ChainFilterRow = {
   chain_id: string;
   chain_name: string | null;
@@ -124,6 +157,26 @@ type TopPromotionDto = {
   hasImage: boolean | null;
 };
 
+type PromoAvailabilityStoreDto = {
+  storeDbId: number;
+  storeId: string;
+  storeName: string | null;
+  city: string | null;
+  isAvailable: boolean;
+};
+
+type CheaperOfferDto = {
+  chainId: string;
+  chainName: string | null;
+  storeId: string;
+  storeName: string | null;
+  city: string | null;
+  effectivePrice: number | null;
+  promoPrice: number | null;
+  price: number | null;
+  updatedAt: string | null;
+};
+
 const DELIVERY_KEYWORD = 'משלוח';
 const BARCODE_ITEM_CODE_REGEX = /^[0-9]{8,14}$/;
 
@@ -149,12 +202,18 @@ const ALCOHOL_BLOCKLIST_PATTERNS: RegExp[] = [
 ];
 const PROMOTIONS_MAX_SCANNED_ROWS = 2000; // kept for hasMore calculation
 let topPromotionsPrewarmPromise: Promise<void> | null = null;
+const PROMOTION_MISSING_IMAGE_CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
 // In-memory cache for chain/store filter data (stable, changes only when scrapor runs)
 const FILTER_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 type FilterCacheEntry<T> = { data: T; expiresAt: number };
 const chainFilterCache = new Map<string, FilterCacheEntry<ChainFilterRow[]>>();
 const storeFilterCache = new Map<string, FilterCacheEntry<StoreFilterRow[]>>();
+type MissingPromotionImageCacheEntry = {
+  expiresAt: number;
+  reportedAt: number;
+};
+const missingPromotionImageCache = new Map<string, MissingPromotionImageCacheEntry>();
 
 function getCachedChains(key: string): ChainFilterRow[] | null {
   const entry = chainFilterCache.get(key);
@@ -185,6 +244,58 @@ function getCachedPromoResult(key: string): PromotionsResultCacheEntry | null {
 }
 function setCachedPromoResult(key: string, all: TopPromotionDto[], sourceExhausted: boolean): void {
   promotionsResultCache.set(key, { all, sourceExhausted, expiresAt: Date.now() + PROMOTIONS_RESULT_CACHE_TTL_MS });
+}
+
+function pruneMissingPromotionImageCache(now = Date.now()): void {
+  for (const [itemCode, entry] of missingPromotionImageCache.entries()) {
+    if (entry.expiresAt <= now) {
+      missingPromotionImageCache.delete(itemCode);
+    }
+  }
+}
+
+function isPromotionImageBlocked(itemCode: string, now = Date.now()): boolean {
+  if (!itemCode) return false;
+  const entry = missingPromotionImageCache.get(itemCode);
+  if (!entry) return false;
+  if (entry.expiresAt <= now) {
+    missingPromotionImageCache.delete(itemCode);
+    return false;
+  }
+  return true;
+}
+
+function normalizePromotionImageReportCodes(raw: unknown): string[] {
+  const values = Array.isArray(raw)
+    ? raw
+    : typeof raw === 'string'
+    ? raw.split(',')
+    : [];
+
+  return Array.from(new Set(
+    values
+      .map((value) => String(value || '').trim())
+      .filter((value) => BARCODE_ITEM_CODE_REGEX.test(value))
+  )).slice(0, 100);
+}
+
+function markPromotionImagesMissing(itemCodes: string[], now = Date.now()): number {
+  let inserted = 0;
+
+  for (const itemCode of itemCodes) {
+    const current = missingPromotionImageCache.get(itemCode);
+    const nextExpiresAt = now + PROMOTION_MISSING_IMAGE_CACHE_TTL_MS;
+
+    if (!current || current.expiresAt < nextExpiresAt) {
+      missingPromotionImageCache.set(itemCode, {
+        expiresAt: nextExpiresAt,
+        reportedAt: now,
+      });
+      inserted += 1;
+    }
+  }
+
+  return inserted;
 }
 
 function ensureTopPromotionsCachePrewarm(windowHours = 0, topN = 300): Promise<void> {
@@ -239,6 +350,57 @@ function mapTopPromotionRow(row: RawTopPromotionRow): TopPromotionDto {
   };
 }
 
+function buildExactPromotionKey(promo: Pick<TopPromotionDto, 'chainId' | 'storeId' | 'itemCode' | 'promotionId' | 'promoPrice' | 'effectivePrice'>): string {
+  return [
+    promo.chainId || '',
+    promo.storeId || '',
+    promo.itemCode || '',
+    promo.promotionId || '',
+    promo.promoPrice ?? '',
+    promo.effectivePrice ?? '',
+  ].join('::');
+}
+
+function mapFullPromotionRow(row: RawFullPromotionRow): TopPromotionDto {
+  const classified = classifyPromotionKind({
+    promotion_description: row.promotion_description,
+    additional_is_coupon: row.additional_is_coupon,
+    additional_restrictions: row.additional_restrictions,
+    club_id: row.club_id,
+  } satisfies Pick<RawPromoContextRow, 'promotion_description' | 'additional_is_coupon' | 'additional_restrictions' | 'club_id'>);
+
+  return {
+    itemCode: row.item_code,
+    itemName: row.item_name,
+    manufacturerName: row.manufacturer_name,
+    imageUrl: getProductDeliveryUrl(row.item_code),
+    chainId: row.chain_id,
+    chainName: row.chain_name,
+    storeId: row.store_id,
+    storeName: row.store_name,
+    city: row.city,
+    unitOfMeasure: row.unit_of_measure,
+    unitQty: row.unit_qty,
+    bIsWeighted: parseUnknownBoolean(row.b_is_weighted, false),
+    price: toNullableNumber(row.price),
+    promoPrice: toNullableNumber(row.promo_price),
+    effectivePrice: toNullableNumber(row.effective_price),
+    discountAmount: toNullableNumber(row.discount_amount),
+    discountPercent: toNullableNumber(row.discount_percent),
+    smartScore: toNullableNumber(row.smart_score),
+    promotionEndDate: row.promotion_end_date
+      ? new Date(row.promotion_end_date).toISOString().slice(0, 10)
+      : null,
+    promotionId: row.promotion_id || null,
+    promotionDescription: row.promotion_description || null,
+    promoKind: classified.promoKind,
+    promoLabel: classified.promoLabel,
+    isConditionalPromo: classified.isConditionalPromo,
+    updatedAt: row.updated_at ? new Date(row.updated_at).toISOString() : null,
+    hasImage: true,
+  };
+}
+
 function isValidTopPromotion(promo: TopPromotionDto): boolean {
   const itemCode = (promo.itemCode || '').trim();
   if (!BARCODE_ITEM_CODE_REGEX.test(itemCode)) return false;
@@ -287,6 +449,37 @@ function parseItemCodes(raw: unknown): string[] {
     .filter(Boolean)
     .slice(0, 100);
 }
+
+router.post('/top-promotions/missing-images', async (req, res) => {
+  try {
+    pruneMissingPromotionImageCache();
+
+    const body = req.body as {
+      itemCodes?: unknown;
+      ids?: unknown;
+    };
+
+    const itemCodes = normalizePromotionImageReportCodes(body?.itemCodes ?? body?.ids);
+    if (itemCodes.length === 0) {
+      return res.status(400).json({ error: 'itemCodes is required' });
+    }
+
+    const storedCount = markPromotionImagesMissing(itemCodes);
+    if (storedCount > 0) {
+      promotionsResultCache.clear();
+    }
+
+    return res.json({
+      success: true,
+      received: itemCodes.length,
+      stored: storedCount,
+      ttlMs: PROMOTION_MISSING_IMAGE_CACHE_TTL_MS,
+    });
+  } catch (error) {
+    console.error('offers.top-promotions.missing-images error:', error);
+    return res.status(500).json({ error: 'Failed to store missing promotion images' });
+  }
+});
 
 router.get('/by-item-code', async (req, res) => {
   const tRouteStart = process.hrtime.bigint();
@@ -552,13 +745,16 @@ router.get('/top-promotions', async (req, res) => {
   const timingsMs: Record<string, number> = {};
 
   try {
+    pruneMissingPromotionImageCache();
+
     const city = typeof req.query.city === 'string' ? req.query.city.trim() : '';
     const chainId = typeof req.query.chainId === 'string' ? req.query.chainId.trim() : '';
     const chainName = typeof req.query.chainName === 'string' ? req.query.chainName.trim() : '';
     const storeId = typeof req.query.storeId === 'string' ? req.query.storeId.trim() : '';
+    const fullResults = parseBooleanQuery(req.query.full, false);
     const includeConditionalPromos = parseBooleanQuery(req.query.includeConditional, false);
     const windowHours = parseWindowHours(req.query.windowHours, 0, 720);
-    const limit = parseLimit(req.query.limit, 50, 100);
+    const limit = parseLimit(req.query.limit, 50, fullResults ? 2500 : 100);
     const offset = parseOffset(req.query.offset, 0);
     const isFirstPage = offset === 0;
     const sortBy = typeof req.query.sortBy === 'string' && ['percent', 'savings', 'score'].includes(req.query.sortBy) ? req.query.sortBy : 'score';
@@ -627,8 +823,96 @@ router.get('/top-promotions', async (req, res) => {
       `);
     };
 
+    const fetchFullPromotionRows = async (): Promise<RawFullPromotionRow[]> => {
+      const chainIdParam = chainId || null;
+      const storeIdParam = storeId || null;
+      const chainNameParam = chainName || null;
+
+      return prisma.$queryRaw<RawFullPromotionRow[]>(Prisma.sql`
+        WITH scoped AS (
+          SELECT
+            p.item_code,
+            p.item_name,
+            p.manufacturer_name,
+            s.chain_id,
+            COALESCE(NULLIF(s.chain_name, ''), s.chain_id)::text AS chain_name,
+            s.store_id,
+            COALESCE(NULLIF(s.store_name, ''), s.store_id)::text AS store_name,
+            s.city::text AS city,
+            pp.unit_of_measure,
+            pp.unit_qty,
+            COALESCE(pp.b_is_weighted, FALSE) AS b_is_weighted,
+            pp.price,
+            psi.promo_price,
+            LEAST(pp.price, psi.promo_price) AS effective_price,
+            GREATEST(pp.price - LEAST(pp.price, psi.promo_price), 0) AS discount_amount,
+            CASE
+              WHEN pp.price > 0 THEN ROUND(
+                (GREATEST(pp.price - LEAST(pp.price, psi.promo_price), 0) / pp.price) * 100.0,
+                2
+              )
+              ELSE 0::NUMERIC
+            END AS discount_percent,
+            ROUND(
+              (
+                CASE
+                  WHEN pp.price > 0 THEN (GREATEST(pp.price - LEAST(pp.price, psi.promo_price), 0) / pp.price) * 100.0
+                  ELSE 0
+                END
+              ) * 0.40
+              + (LEAST(GREATEST(pp.price - LEAST(pp.price, psi.promo_price), 0), 80) * 0.60),
+              2
+            ) AS smart_score,
+            psi.promotion_end_date,
+            psi.updated_at,
+            psi.promotion_id,
+            promo.promotion_description,
+            promo.additional_is_coupon,
+            promo.additional_restrictions,
+            promo.club_id
+          FROM promotion_store_items psi
+          JOIN products p ON p.id = psi.product_id
+          JOIN stores s ON s.id = psi.store_id
+          JOIN product_prices pp ON pp.product_id = psi.product_id AND pp.store_id = psi.store_id
+          LEFT JOIN promotions promo
+            ON promo.chain_id = psi.chain_id
+           AND promo.promotion_id = psi.promotion_id
+          WHERE COALESCE(s.city, '') <> ''
+            AND s.city = ${city}
+            AND (${chainIdParam}::text IS NULL OR s.chain_id = ${chainIdParam}::text)
+            AND (${storeIdParam}::text IS NULL OR s.store_id = ${storeIdParam}::text)
+            AND (${chainNameParam}::text IS NULL OR lower(s.chain_name) = lower(${chainNameParam}::text))
+            AND psi.promo_price IS NOT NULL
+            AND psi.promo_price > 0
+            AND (psi.promotion_end_date IS NULL OR psi.promotion_end_date >= CURRENT_DATE)
+            AND (
+              ${windowHours}::integer <= 0
+              OR psi.updated_at >= NOW() - make_interval(hours => ${windowHours}::integer)
+            )
+            AND pp.price IS NOT NULL
+            AND pp.price > 0
+            AND psi.promo_price < pp.price
+            AND psi.promo_price >= (pp.price * 0.05)
+            AND p.item_code ~ '^[0-9]{8,14}$'
+            AND COALESCE(BTRIM(p.item_name), '') <> ''
+            AND p.item_name NOT ILIKE '%משלוח%'
+        )
+        SELECT *
+        FROM scoped
+        ORDER BY
+          CASE WHEN ${sortBy} = 'percent' THEN discount_percent END DESC NULLS LAST,
+          CASE WHEN ${sortBy} = 'savings' THEN discount_amount END DESC NULLS LAST,
+          smart_score DESC NULLS LAST,
+          updated_at DESC NULLS LAST,
+          item_code ASC,
+          store_id ASC,
+          promotion_id ASC
+        LIMIT 2500
+      `);
+    };
+
     const tPromotionsSql = process.hrtime.bigint();
-    const promoCacheKey = `${city}|${windowHours}|${chainId}|${chainName}|${storeId}|${includeConditionalPromos}|${sortBy}`;
+    const promoCacheKey = `${city}|${windowHours}|${chainId}|${chainName}|${storeId}|${includeConditionalPromos}|${sortBy}|${fullResults ? 'full' : 'fast'}`;
     const cachedPromoEntry = getCachedPromoResult(promoCacheKey);
 
     const collected: TopPromotionDto[] = [];
@@ -637,29 +921,45 @@ router.get('/top-promotions', async (req, res) => {
 
     if (cachedPromoEntry) {
       // Serve from shared in-memory cache — 0 DB round-trips
-      for (const item of cachedPromoEntry.all) collected.push(item);
+      for (const item of cachedPromoEntry.all) {
+        if (isPromotionImageBlocked(item.itemCode)) continue;
+        collected.push(item);
+      }
       sourceExhausted = cachedPromoEntry.sourceExhausted;
     } else {
       const seenPromotionKeys = new Set<string>();
 
-      let allRows = await fetchAllPromotionRows();
+      let mappedRows: TopPromotionDto[] = [];
 
-      // Cold-start safeguard: if cache is empty, prewarm and retry once.
-      if (allRows.length === 0) {
-        const tWarmup = process.hrtime.bigint();
-        await ensureTopPromotionsCachePrewarm(windowHours, 300);
-        timingsMs.cacheWarmupSql = elapsedMs(tWarmup);
-        allRows = await fetchAllPromotionRows();
+      if (fullResults) {
+        const allRows = await fetchFullPromotionRows();
+        scannedRows = allRows.length;
+        sourceExhausted = allRows.length < 2500;
+        mappedRows = allRows.map(mapFullPromotionRow);
+      } else {
+        let allRows = await fetchAllPromotionRows();
+
+        // Cold-start safeguard: if cache is empty, prewarm and retry once.
+        if (allRows.length === 0) {
+          const tWarmup = process.hrtime.bigint();
+          await ensureTopPromotionsCachePrewarm(windowHours, 300);
+          timingsMs.cacheWarmupSql = elapsedMs(tWarmup);
+          allRows = await fetchAllPromotionRows();
+        }
+
+        scannedRows = allRows.length;
+        sourceExhausted = allRows.length < 2000;
+        mappedRows = allRows.map(mapTopPromotionRow);
       }
 
-      scannedRows = allRows.length;
-      sourceExhausted = allRows.length < 2000;
-
-      for (const promo of allRows.map(mapTopPromotionRow)) {
+      for (const promo of mappedRows) {
+        if (isPromotionImageBlocked(promo.itemCode)) continue;
         if (!isValidTopPromotion(promo)) continue;
         if (!includeConditionalPromos && shouldHidePromoWhenConditionalFilterOff(promo)) continue;
 
-        const dedupeKey = buildTopPromotionDedupeKey(promo);
+        const dedupeKey = fullResults
+          ? buildExactPromotionKey(promo)
+          : buildTopPromotionDedupeKey(promo);
         if (seenPromotionKeys.has(dedupeKey)) continue;
 
         seenPromotionKeys.add(dedupeKey);
@@ -779,6 +1079,7 @@ router.get('/top-promotions', async (req, res) => {
       rowCount: promotions.length,
       scannedRows,
       sourceExhausted,
+      fullResults,
       timingsMs,
     });
 
@@ -805,6 +1106,150 @@ router.get('/top-promotions', async (req, res) => {
     });
   } catch (error) {
     console.error('offers.top-promotions error:', error);
+    return res.status(500).json({ error: 'Internal server error', detail: String(error) });
+  }
+});
+
+router.get('/top-promotions/details', async (req, res) => {
+  try {
+    const itemCode = typeof req.query.itemCode === 'string' ? req.query.itemCode.trim() : '';
+    const chainId = typeof req.query.chainId === 'string' ? req.query.chainId.trim() : '';
+    const promotionId = typeof req.query.promotionId === 'string' ? req.query.promotionId.trim() : '';
+    const city = typeof req.query.city === 'string' ? req.query.city.trim() : '';
+    const storeId = typeof req.query.storeId === 'string' ? req.query.storeId.trim() : '';
+    const effectivePrice = Number.parseFloat(String(req.query.effectivePrice ?? ''));
+
+    if (!itemCode || !chainId) {
+      return res.status(400).json({ error: 'itemCode and chainId are required' });
+    }
+
+    type AvailabilityRow = {
+      store_db_id: number | bigint;
+      store_id: string;
+      store_name: string | null;
+      city: string | null;
+      is_available: unknown;
+    };
+
+    const availabilityRows = await prisma.$queryRaw<AvailabilityRow[]>(Prisma.sql`
+      WITH target_product AS (
+        SELECT id
+        FROM products
+        WHERE item_code = ${itemCode}::text
+        LIMIT 1
+      ),
+      matched_promo AS (
+        SELECT psi.promotion_id
+        FROM promotion_store_items psi
+        JOIN target_product tp ON tp.id = psi.product_id
+        JOIN stores s ON s.id = psi.store_id
+        WHERE psi.chain_id = ${chainId}::text
+          AND (${promotionId || null}::text IS NULL OR psi.promotion_id = ${promotionId || null}::text)
+          AND (${storeId || null}::text IS NULL OR s.store_id = ${storeId || null}::text)
+        ORDER BY
+          CASE
+            WHEN ${promotionId || null}::text IS NOT NULL THEN 0::numeric
+            WHEN ${Number.isFinite(effectivePrice) ? effectivePrice : null}::numeric IS NOT NULL
+              THEN ABS(COALESCE(psi.promo_price, 0) - ${Number.isFinite(effectivePrice) ? effectivePrice : null}::numeric)
+            ELSE 0::numeric
+          END ASC,
+          psi.updated_at DESC NULLS LAST,
+          psi.promotion_id ASC
+        LIMIT 1
+      ),
+      available_store_ids AS (
+        SELECT DISTINCT psi.store_id
+        FROM promotion_store_items psi
+        JOIN target_product tp ON tp.id = psi.product_id
+        JOIN matched_promo mp ON mp.promotion_id = psi.promotion_id
+        WHERE psi.chain_id = ${chainId}::text
+      )
+      SELECT
+        s.id AS store_db_id,
+        s.store_id,
+        COALESCE(NULLIF(s.store_name, ''), s.store_id)::text AS store_name,
+        s.city::text AS city,
+        CASE WHEN asi.store_id IS NULL THEN FALSE ELSE TRUE END AS is_available
+      FROM stores s
+      LEFT JOIN available_store_ids asi ON asi.store_id = s.id
+      WHERE s.chain_id = ${chainId}::text
+        AND (${city || null}::text IS NULL OR s.city = ${city || null}::text)
+      ORDER BY s.store_name ASC, s.store_id ASC
+      LIMIT 500
+    `);
+
+    const cheaperRows = await prisma.$queryRaw<RawOfferRow[]>(Prisma.sql`
+      SELECT
+        o.item_code,
+        o.item_name,
+        o.manufacturer_name,
+        o.chain_id,
+        s_name.chain_name,
+        o.store_id,
+        o.store_name,
+        o.city,
+        o.price,
+        o.promo_price,
+        o.effective_price,
+        o.unit_of_measure,
+        o.unit_qty,
+        o.b_is_weighted,
+        o.updated_at
+      FROM public.get_offers_for_item_code(
+        ${itemCode}::text,
+        ${city || null}::text,
+        NULL::text,
+        50::integer,
+        0::integer,
+        NULL::text
+      ) o
+      LEFT JOIN LATERAL (
+        SELECT chain_name FROM stores WHERE chain_id = o.chain_id AND store_id = o.store_id LIMIT 1
+      ) s_name ON true
+      ORDER BY o.effective_price ASC NULLS LAST, o.updated_at DESC NULLS LAST, o.store_id ASC
+    `);
+
+    const cheaperOffers = cheaperRows
+      .map(mapOfferRow)
+      .filter((offer) => {
+        if (!Number.isFinite(effectivePrice)) return false;
+        if (offer.effectivePrice === null || !Number.isFinite(offer.effectivePrice)) return false;
+        if (offer.effectivePrice >= effectivePrice) return false;
+        if (offer.chainId === chainId && offer.storeId === storeId) return false;
+        return true;
+      })
+      .slice(0, 10)
+      .map<CheaperOfferDto>((offer) => ({
+        chainId: offer.chainId,
+        chainName: offer.chainName ?? null,
+        storeId: offer.storeId,
+        storeName: offer.storeName ?? null,
+        city: offer.city ?? null,
+        effectivePrice: offer.effectivePrice,
+        promoPrice: offer.promoPrice,
+        price: offer.price,
+        updatedAt: offer.updatedAt,
+      }));
+
+    const availability = availabilityRows.map<PromoAvailabilityStoreDto>((row) => ({
+      storeDbId: Number(row.store_db_id),
+      storeId: row.store_id,
+      storeName: row.store_name,
+      city: row.city,
+      isAvailable: parseUnknownBoolean(row.is_available, false),
+    }));
+
+    return res.json({
+      availability,
+      cheaperOffers,
+      meta: {
+        cheaperCount: cheaperOffers.length,
+        availableCount: availability.filter((store) => store.isAvailable).length,
+        totalStores: availability.length,
+      },
+    });
+  } catch (error) {
+    console.error('offers.top-promotions.details error:', error);
     return res.status(500).json({ error: 'Internal server error', detail: String(error) });
   }
 });

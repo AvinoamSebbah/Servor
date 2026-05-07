@@ -18,7 +18,7 @@ export type PromoContext = {
   isConditionalPromo: boolean;
 };
 
-type RawPromoContextRow = {
+export type RawPromoContextRow = {
   item_code: string;
   chain_id: string;
   store_id: string;
@@ -92,7 +92,7 @@ function isCouponFlagged(additionalIsCoupon: string | null, additionalRestrictio
   );
 }
 
-function classifyPromotionKind(row: Pick<RawPromoContextRow, 'promotion_description' | 'additional_is_coupon' | 'additional_restrictions' | 'club_id'>): PromoContext {
+export function classifyPromotionKind(row: Pick<RawPromoContextRow, 'promotion_description' | 'additional_is_coupon' | 'additional_restrictions' | 'club_id'>): PromoContext {
   const description = normalizeText(row.promotion_description);
   const restrictions = normalizeText(row.additional_restrictions);
   const combined = `${description} ${restrictions}`.trim();
