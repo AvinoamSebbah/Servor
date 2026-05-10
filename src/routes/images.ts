@@ -1,4 +1,4 @@
-import { Router } from 'express';
+import { Router, type Response } from 'express';
 import axios from 'axios';
 import { v2 as cloudinary } from 'cloudinary';
 import fs from 'fs';
@@ -308,16 +308,12 @@ function resolveLocalStoreLogo(reqHost: string, protocol: string, slug: string):
   return null;
 }
 
-router.get('/image/:barcode', async (req, res) => {
-  try {
-    const { barcode } = req.params;
-    res.setHeader('Cache-Control', 'no-store, max-age=0');
-    return res.json(await resolveImage(barcode, 'single', { bypassNegativeCache: true }));
-  } catch (error) {
-    console.error('[PRODUCT IMAGE] Error:', error);
-    return res.status(500).json({ error: 'Internal server error' });
-  }
-});
+function respondBlockedProductImageLookup(res: Response) {
+  res.setHeader('Cache-Control', 'no-store, max-age=0');
+  return res.status(404).json({ error: 'Not found' });
+}
+
+router.get('/image/:barcode', (_req, res) => respondBlockedProductImageLookup(res));
 
 router.get('/catalog-image/:id', (req, res) => {
   const imageUrl = getSignedCatalogDeliveryUrl(req.params.id);
@@ -359,29 +355,7 @@ router.post('/catalog-images/batch', (req, res) => {
   return res.json({ images });
 });
 
-router.post('/images/batch', async (req, res) => {
-  try {
-    const { barcodes } = req.body as { barcodes?: unknown };
-
-    if (!Array.isArray(barcodes) || barcodes.length === 0) {
-      return res.status(400).json({ error: 'barcodes array required' });
-    }
-
-    const codes = (barcodes as string[])
-      .map((code) => String(code || '').trim())
-      .filter((code) => code.length > 0)
-      .slice(0, 50);
-
-    const entries = await Promise.all(
-      codes.map(async (barcode) => [barcode, await resolveImage(barcode)] as const),
-    );
-
-    return res.json({ images: Object.fromEntries(entries) });
-  } catch (error) {
-    console.error('[PRODUCT IMAGE BATCH] Error:', error);
-    return res.status(500).json({ error: 'Internal server error' });
-  }
-});
+router.post('/images/batch', (_req, res) => respondBlockedProductImageLookup(res));
 
 router.get('/store-logo/:chainId', async (req, res) => {
   try {

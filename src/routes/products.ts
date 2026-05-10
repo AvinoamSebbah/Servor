@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { PrismaClient, Prisma } from '@prisma/client';
-import { resolveImage, getProductDeliveryUrl } from './images';
+import { getProductDeliveryUrl } from './images';
 import { buildOffsetPagination, mapOfferRow, mapOffersToLegacyDetails, RawOfferRow } from '../services/offerMapping';
 import { enrichApiOffersWithPromoContext } from '../services/promoContext';
 
@@ -929,55 +929,8 @@ router.get('/search/details', async (req, res) => {
 });
 
 router.get('/search/stream', async (req, res) => {
-  const itemCodes = parseItemCodesQuery(req.query.itemCodes);
-  const streamStart = Date.now();
-  res.setHeader('Content-Type', 'text/event-stream');
-  res.setHeader('Cache-Control', 'no-cache, no-transform');
-  res.setHeader('Connection', 'keep-alive');
-  res.flushHeaders?.();
-
-  if (itemCodes.length === 0) {
-    res.write('event: done\n');
-    res.write(`data: ${JSON.stringify({ success: true })}\n\n`);
-    res.end();
-    return;
-  }
-
-  let closed = false;
-  req.on('close', () => {
-    closed = true;
-  });
-
-  const sendEvent = (event: string, data: unknown) => {
-    if (closed) return;
-    res.write(`event: ${event}\n`);
-    res.write(`data: ${JSON.stringify(data)}\n\n`);
-  };
-
-  void (async () => {
-    try {
-      await Promise.allSettled(
-        itemCodes.map(async (itemCode) => {
-          const result = await resolveImage(itemCode);
-
-          if (result.imageUrl) {
-            sendEvent('image_update', {
-              itemCode,
-              imageUrl: result.imageUrl,
-              source: result.source,
-              updatedAt: Date.now(),
-            });
-          }
-        })
-      );
-
-      sendEvent('done', { success: true });
-    } catch (error) {
-      sendEvent('error', { message: String(error) });
-    } finally {
-      if (!closed) res.end();
-    }
-  })();
+  res.setHeader('Cache-Control', 'no-store, max-age=0');
+  return res.status(404).json({ error: 'Not found' });
 });
 
 // ─── GET /api/products/search ────────────────────────────────────────────────
@@ -1467,6 +1420,7 @@ router.get('/:barcode', async (req, res) => {
         manufacturerName: productRow.manufacturer_name,
         manufacturerItemDescription: productRow.manufacturer_item_description,
         manufactureCountry: productRow.manufacture_country,
+        imageUrl: getProductDeliveryUrl(productRow.item_code),
       },
       prices: detail.prices,
       promotions: detail.promotions,
