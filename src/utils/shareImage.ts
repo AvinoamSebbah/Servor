@@ -5,6 +5,7 @@ import { Prisma, PrismaClient } from '@prisma/client';
 import { Resvg } from '@resvg/resvg-js';
 import axios from 'axios';
 import sharp from 'sharp';
+import { getProductImageUrl } from './media';
 
 type ShareTheme = 'dark' | 'light';
 type ShareLang = 'he' | 'fr' | 'en';
@@ -501,13 +502,15 @@ export async function generateProductShareImage(
   const palette = getThemePalette(theme);
   const copy = getCopy(lang);
   const meta = await getProductShareMeta(prisma, barcode, city);
+  const fontCss = await buildEmbeddedFontCss();
   const logoDataUri =
     (await readFileDataUri(LOCAL_AGALI_LOGO_PATH, 'image/png')) ??
     (await fetchDataUri(`${PUBLIC_FRONTEND_BASE_URL}/logo.png`));
   const productImageCandidates = [
+    getProductImageUrl(barcode),
     `https://m.pricez.co.il/ProductPictures/200x/${encodeURIComponent(barcode)}.jpg`,
     `https://res.cloudinary.com/dprve5nst/image/upload/w_360,h_360,c_pad,b_white/products/${encodeURIComponent(barcode)}.jpg`,
-  ];
+  ].filter(Boolean) as string[];
   let productImageDataUri: string | null = null;
   for (const url of productImageCandidates) {
     productImageDataUri = await fetchDataUri(url);
@@ -595,6 +598,9 @@ export async function generateProductShareImage(
   const svg = `
   <svg width="${CANVAS_WIDTH}" height="${CANVAS_HEIGHT}" viewBox="0 0 ${CANVAS_WIDTH} ${CANVAS_HEIGHT}" xmlns="http://www.w3.org/2000/svg">
     <defs>
+      <style>
+        ${fontCss}
+      </style>
       <linearGradient id="bg" x1="0" y1="0" x2="${CANVAS_WIDTH}" y2="${CANVAS_HEIGHT}" gradientUnits="userSpaceOnUse">
         <stop stop-color="${palette.bgStart}" />
         <stop offset="1" stop-color="${palette.bgEnd}" />
