@@ -215,50 +215,27 @@ function getSignedCatalogDeliveryUrl(id: string, width = 320, height = 320): str
   return getImageUrl(getCatalogImagePath(normalizedId), width, height);
 }
 
-async function fetchOpenFoodFactsUrl(barcode: string): Promise<string | null> {
-  try {
-    const res = await axios.get(
-      `https://world.openfoodfacts.org/api/v0/product/${encodeURIComponent(barcode)}.json`,
-      {
-        timeout: 3000,
-        httpsAgent: externalHttpsAgent,
-      },
-    );
-    return res.data?.product?.image_front_url
-      ?? res.data?.product?.image_url
-      ?? null;
-  } catch {
-    return null;
-  }
-}
-
 async function findAndPersistMissingImage(barcode: string, key: string): Promise<{ imageUrl: string | null; source: string }> {
   const pricezUrl = `https://m.pricez.co.il/ProductPictures/200x/${encodeURIComponent(barcode)}.jpg`;
-  try {
-    await uploadRemoteImageToSpaces(key, pricezUrl, 'pricez');
-    return { imageUrl: getSignedProductDeliveryUrl(barcode), source: 'pricez' };
-  } catch (error) {
-    if (isCloudinaryBridgeEnabled()) {
-      try {
-        const bridgedUrl = await fetchViaCloudinaryBridge(pricezUrl, `pricez-${barcode}`);
-        await uploadRemoteImageToSpaces(key, bridgedUrl, 'pricez-cloudinary-bridge');
-        return { imageUrl: getSignedProductDeliveryUrl(barcode), source: 'pricez-cloudinary-bridge' };
-      } catch (bridgeError) {
-        console.warn(`[PRODUCT IMAGE] Pricez bridge failed for ${barcode}`, {
-          directError: error instanceof Error ? error.message : String(error),
-          bridgeError: bridgeError instanceof Error ? bridgeError.message : String(bridgeError),
-        });
-      }
-    }
-  }
 
-  const openFoodFactsUrl = await fetchOpenFoodFactsUrl(barcode);
-  if (openFoodFactsUrl) {
+  if (isCloudinaryBridgeEnabled()) {
     try {
-      await uploadRemoteImageToSpaces(key, openFoodFactsUrl, 'openfoodfacts');
-      return { imageUrl: getSignedProductDeliveryUrl(barcode), source: 'openfoodfacts' };
-    } catch {
-      // continue to none
+      const bridgedUrl = await fetchViaCloudinaryBridge(pricezUrl, `pricez-${barcode}`);
+      await uploadRemoteImageToSpaces(key, bridgedUrl, 'pricez-cloudinary-bridge');
+      return { imageUrl: getSignedProductDeliveryUrl(barcode), source: 'pricez-cloudinary-bridge' };
+    } catch (bridgeError) {
+      console.warn(`[PRODUCT IMAGE] Pricez Cloudinary bridge failed for ${barcode}`, {
+        bridgeError: bridgeError instanceof Error ? bridgeError.message : String(bridgeError),
+      });
+    }
+  } else {
+    try {
+      await uploadRemoteImageToSpaces(key, pricezUrl, 'pricez-direct');
+      return { imageUrl: getSignedProductDeliveryUrl(barcode), source: 'pricez-direct' };
+    } catch (directError) {
+      console.warn(`[PRODUCT IMAGE] Pricez direct fetch failed for ${barcode}`, {
+        directError: directError instanceof Error ? directError.message : String(directError),
+      });
     }
   }
 
@@ -355,7 +332,59 @@ router.post('/catalog-images/batch', (req, res) => {
   return res.json({ images });
 });
 
-router.post('/images/batch', (_req, res) => respondBlockedProductImageLookup(res));
+router.post('/images/batch', async (req, res) => {
+  try {
+    const body = req.body as { barcodes?: unknown; itemCodes?: unknown; products?: unknown; bypassNegativeCache?: unknown };
+    const codesFromProducts = Array.isArray(body?.products)
+      ? (body.products as Array<{ barcode?: unknown; itemCode?: unknown; item_code?: unknown }>).map((product) =>
+          String(product?.barcode || product?.itemCode || product?.item_code || '').trim()
+        )
+      : [];
+    const rawCodes = Array.isArray(body?.barcodes)
+      ? body.barcodes
+      : Array.isArray(body?.itemCodes)
+      ? body.itemCodes
+      : codesFromProducts;
+    const codes = [
+      ...new Set(
+        (rawCodes as unknown[])
+          .map((code) => String(code || '').trim())
+          .filter((code) => code.length > 0)
+      ),
+    ].slice(0, 50);
+
+    const images: Record<string, { imageUrl: string | null; pending: boolean; source: string }> = {};
+    await Promise.all(
+      codes.map(async (code) => {
+        try {
+          const result = await resolveImage(code, 'batch', {
+            bypassNegativeCache: body?.bypassNegativeCache === true,
+          });
+          images[code] = {
+            imageUrl: result.imageUrl,
+            pending: false,
+            source: result.source,
+          };
+        } catch (error) {
+          console.warn(`[PRODUCT IMAGE] Batch lookup failed for ${code}`, {
+            error: error instanceof Error ? error.message : String(error),
+          });
+          images[code] = {
+            imageUrl: null,
+            pending: false,
+            source: 'error',
+          };
+        }
+      }),
+    );
+
+    res.setHeader('Cache-Control', 'no-store, max-age=0');
+    return res.json({ images });
+  } catch (error) {
+    console.error('[PRODUCT IMAGE] Batch route failed:', error);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+});
 
 router.get('/store-logo/:chainId', async (req, res) => {
   try {
