@@ -20,10 +20,18 @@ dotenv.config();
 
 const app = express();
 const PORT = process.env.PORT || 3001;
-const allowedOrigins = (process.env.CORS_ALLOWED_ORIGINS || process.env.FRONTEND_URL || '')
+const DEFAULT_ALLOWED_ORIGINS = [
+  'https://agali.live',
+  'https://www.agali.live',
+  'https://api.agali.live',
+];
+const allowedOrigins = [
+  ...DEFAULT_ALLOWED_ORIGINS,
+  ...(process.env.CORS_ALLOWED_ORIGINS || process.env.FRONTEND_URL || '')
   .split(',')
   .map((origin) => origin.trim())
-  .filter(Boolean);
+    .filter(Boolean),
+];
 
 function isAllowedOrigin(origin: string) {
   if (allowedOrigins.includes(origin)) {
@@ -49,7 +57,7 @@ app.use(cors({
       return;
     }
 
-    callback(new Error('CORS origin not allowed'));
+    callback(null, false);
   },
   credentials: true,
 }));
