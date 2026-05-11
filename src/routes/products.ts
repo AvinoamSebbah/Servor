@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { PrismaClient, Prisma } from '@prisma/client';
 import { getProductDeliveryUrl } from './images';
 import { buildOffsetPagination, mapOfferRow, mapOffersToLegacyDetails, RawOfferRow } from '../services/offerMapping';
-import { enrichApiOffersWithPromoContext } from '../services/promoContext';
+import { classifyPromotionKind, enrichApiOffersWithPromoContext } from '../services/promoContext';
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -44,6 +44,8 @@ type SearchCacheEntry = {
 
 const searchResponseCache = new Map<string, SearchCacheEntry>();
 
+let storePromoCacheCheck: { checkedAt: number; available: boolean } | null = null;
+
 function elapsedMs(start: bigint): number {
   return Number(process.hrtime.bigint() - start) / 1_000_000;
 }
@@ -52,6 +54,43 @@ function toServerTiming(timingsMs: Record<string, number>): string {
   return Object.entries(timingsMs)
     .map(([k, v]) => `${k};dur=${v.toFixed(1)}`)
     .join(', ');
+}
+
+async function hasStorePromoCache(): Promise<boolean> {
+  const now = Date.now();
+  if (storePromoCacheCheck && now - storePromoCacheCheck.checkedAt < 60_000) {
+    return storePromoCacheCheck.available;
+  }
+
+  try {
+    const rows = await prisma.$queryRaw<Array<{ available: boolean }>>(Prisma.sql`
+      SELECT
+        to_regclass('public.product_store_current_promos') IS NOT NULL
+        AND COUNT(*) FILTER (
+          WHERE column_name IN (
+            'product_id',
+            'store_id',
+            'promo_price',
+            'chain_id',
+            'promotion_id',
+            'promotion_description',
+            'promotion_end_date',
+            'additional_is_coupon',
+            'additional_restrictions',
+            'club_id'
+          )
+        ) = 10 AS available
+      FROM information_schema.columns
+      WHERE table_schema = 'public'
+        AND table_name = 'product_store_current_promos'
+    `);
+    const available = Boolean(rows[0]?.available);
+    storePromoCacheCheck = { checkedAt: now, available };
+    return available;
+  } catch {
+    storePromoCacheCheck = { checkedAt: now, available: false };
+    return false;
+  }
 }
 
 router.get('/search', async (req, res) => {
@@ -75,8 +114,12 @@ router.get('/search', async (req, res) => {
     const offsetRaw = Number.parseInt(String(req.query.offset ?? '0'), 10);
     const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? Math.min(limitRaw, 100) : 10;
     const offset = Number.isFinite(offsetRaw) && offsetRaw >= 0 ? offsetRaw : 0;
-    const candidateMultiplier = includeDetails ? 6 : 14;
-    const candidateLimit = Math.min(Math.max(limit * candidateMultiplier, 60), 240);
+    const hasNarrowStoreFilter = Boolean(chainId || storeId);
+    const candidateMultiplier = includeDetails ? 6 : hasNarrowStoreFilter ? 8 : 2;
+    const candidateMin = includeDetails ? 60 : hasNarrowStoreFilter ? 60 : limit + 5;
+    const candidateMax = includeDetails ? 240 : hasNarrowStoreFilter ? 160 : 30;
+    const candidateLimit = Math.min(Math.max(limit * candidateMultiplier, candidateMin), candidateMax);
+    const searchTextCandidateLimit = Math.min(Math.max(offset + candidateLimit * 40, 1000), 2000);
     const detailCandidateLimit = includeDetails
       ? Math.min(Math.max(limit * 3, 20), Math.max(limit, candidateLimit))
       : 0;
@@ -112,7 +155,7 @@ router.get('/search', async (req, res) => {
           ${query}::text AS raw_query,
           websearch_to_tsquery('simple', ${query}::text) AS tsq
       ),
-      matched AS (
+      fts_candidates AS MATERIALIZED (
         SELECT
           p.id AS product_id,
           p.item_code,
@@ -130,24 +173,27 @@ router.get('/search', async (req, res) => {
                 WHEN lower(COALESCE(p.manufacturer_name, '')) LIKE lower(params.raw_query) || '%' THEN 0.4
                 ELSE 0
               END
-            + (LN(1 + LEAST(COALESCE(pss.chain_count, 0), 40)) * 0.22)
-            + (LEAST(COALESCE(pss.chain_count, 0), 25) * 0.03)
-          )::real AS rank,
-          COALESCE(pss.chain_count, 0)::integer AS chain_count
+          )::real AS text_rank
         FROM products p
         CROSS JOIN params
-        LEFT JOIN product_search_stats pss ON pss.product_id = p.id
         WHERE COALESCE(${query}::text, '') <> ''
           AND p.search_idx_col @@ params.tsq
+        ORDER BY text_rank DESC NULLS LAST, p.item_code ASC
+        LIMIT ${searchTextCandidateLimit}::integer
       )
       SELECT
-        product_id,
-        item_code,
-        item_name,
-        manufacturer_name,
-        rank,
-        chain_count
-      FROM matched
+        c.product_id,
+        c.item_code,
+        c.item_name,
+        c.manufacturer_name,
+        (
+          c.text_rank
+          + (LN(1 + LEAST(COALESCE(pss.chain_count, 0), 40)) * 0.22)
+          + (LEAST(COALESCE(pss.chain_count, 0), 25) * 0.03)
+        )::real AS rank,
+        COALESCE(pss.chain_count, 0)::integer AS chain_count
+      FROM fts_candidates c
+      LEFT JOIN product_search_stats pss ON pss.product_id = c.product_id
       ORDER BY chain_count DESC NULLS LAST, rank DESC NULLS LAST, item_code ASC
       LIMIT ${candidateLimit}::integer
       OFFSET ${offset}::integer
@@ -156,49 +202,87 @@ router.get('/search', async (req, res) => {
 
     if (rows.length < limit && query.length >= 2) {
       const existingProductIds = rows.map((row) => row.product_id);
+      const fallbackLimit = Math.min(Math.max(limit * 3, 30), 80);
       const tFallbackSql = process.hrtime.bigint();
       const fallbackRows = await prisma.$queryRaw<SearchProductRow[]>(Prisma.sql`
         WITH params AS (
           SELECT
             ${query}::text AS raw_query,
             regexp_replace(${query}::text, '\s+', '', 'g') AS compact_query
+        ),
+        candidate_hits AS (
+          SELECT
+            p.id,
+            p.item_code,
+            p.item_name,
+            p.manufacturer_name,
+            similarity(p.item_name, params.raw_query) AS base_similarity
+          FROM products p
+          CROSS JOIN params
+          WHERE p.item_name % params.raw_query
+            ${existingProductIds.length > 0
+              ? Prisma.sql`AND p.id <> ALL(${existingProductIds}::int[])`
+              : Prisma.empty}
+          UNION ALL
+          SELECT
+            p.id,
+            p.item_code,
+            p.item_name,
+            p.manufacturer_name,
+            similarity(p.manufacturer_name, params.raw_query) AS base_similarity
+          FROM products p
+          CROSS JOIN params
+          WHERE p.manufacturer_name % params.raw_query
+            ${existingProductIds.length > 0
+              ? Prisma.sql`AND p.id <> ALL(${existingProductIds}::int[])`
+              : Prisma.empty}
+        ),
+        ranked_candidates AS (
+          SELECT DISTINCT ON (id)
+            id,
+            item_code,
+            item_name,
+            manufacturer_name,
+            base_similarity
+          FROM candidate_hits
+          ORDER BY id, base_similarity DESC NULLS LAST
+        ),
+        candidates AS MATERIALIZED (
+          SELECT
+            id,
+            item_code,
+            item_name,
+            manufacturer_name
+          FROM ranked_candidates
+          ORDER BY base_similarity DESC NULLS LAST, item_code ASC
+          LIMIT 1000
         )
         SELECT
-          p.id AS product_id,
-          p.item_code,
-          p.item_name,
-          p.manufacturer_name,
+          c.id AS product_id,
+          c.item_code,
+          c.item_name,
+          c.manufacturer_name,
           (
             GREATEST(
-              similarity(COALESCE(p.item_name, ''), params.raw_query),
-              similarity(COALESCE(p.manufacturer_name, ''), params.raw_query),
-              similarity(regexp_replace(COALESCE(p.item_name, ''), '\s+', '', 'g'), params.compact_query),
-              word_similarity(params.raw_query, COALESCE(p.item_name, '')),
-              word_similarity(params.raw_query, COALESCE(p.manufacturer_name, ''))
+              similarity(COALESCE(c.item_name, ''), params.raw_query),
+              similarity(COALESCE(c.manufacturer_name, ''), params.raw_query),
+              similarity(regexp_replace(COALESCE(c.item_name, ''), '\s+', '', 'g'), params.compact_query),
+              word_similarity(params.raw_query, COALESCE(c.item_name, '')),
+              word_similarity(params.raw_query, COALESCE(c.manufacturer_name, ''))
             ) * 3.5
             + CASE
-                WHEN lower(COALESCE(p.item_name, '')) LIKE lower(params.raw_query) || '%' THEN 2
+                WHEN lower(COALESCE(c.item_name, '')) LIKE lower(params.raw_query) || '%' THEN 2
                 ELSE 0
               END
             + (LN(1 + LEAST(COALESCE(pss.chain_count, 0), 40)) * 0.18)
             + (LEAST(COALESCE(pss.chain_count, 0), 25) * 0.02)
           )::real AS rank,
           COALESCE(pss.chain_count, 0)::integer AS chain_count
-        FROM products p
+        FROM candidates c
         CROSS JOIN params
-        LEFT JOIN product_search_stats pss ON pss.product_id = p.id
-        WHERE (
-            COALESCE(p.item_name, '') % params.raw_query
-            OR COALESCE(p.manufacturer_name, '') % params.raw_query
-            OR word_similarity(params.raw_query, COALESCE(p.item_name, '')) >= 0.22
-            OR word_similarity(params.raw_query, COALESCE(p.manufacturer_name, '')) >= 0.22
-            OR similarity(regexp_replace(COALESCE(p.item_name, ''), '\s+', '', 'g'), params.compact_query) >= 0.18
-          )
-          ${existingProductIds.length > 0
-            ? Prisma.sql`AND p.id <> ALL(${existingProductIds}::int[])`
-            : Prisma.empty}
-        ORDER BY chain_count DESC NULLS LAST, rank DESC NULLS LAST, p.item_code ASC
-        LIMIT ${Math.min(limit * 2, 30)}::integer
+        LEFT JOIN product_search_stats pss ON pss.product_id = c.id
+        ORDER BY chain_count DESC NULLS LAST, rank DESC NULLS LAST, c.item_code ASC
+        LIMIT ${fallbackLimit}::integer
       `);
       rows = [...rows, ...fallbackRows];
       timingsMs.fallbackSql = elapsedMs(tFallbackSql);
@@ -210,7 +294,26 @@ router.get('/search', async (req, res) => {
       effectivePrice: number | null;
       hasPromo: boolean;
       availableChains: string[];
+      promotion: {
+        id: string;
+        promotion_id: string;
+        promotion_description: string | null;
+        promotion_start_date: string;
+        promotion_end_date: string;
+        club_id: null;
+        chain_id: string;
+        discounted_price: string;
+        discount_rate: null;
+        min_qty: null;
+        max_qty: null;
+        available_in_store_ids: string[];
+        matched_item_code: string;
+        promotion_type: string | null;
+        promotion_badge_label: string | null;
+        is_conditional_promo: boolean;
+      } | null;
     }>();
+    let summarySource: 'none' | 'promoCache' | 'live' = 'none';
 
     if (includeDetails && rows.length > 0) {
       const detailRows = rows.slice(0, detailCandidateLimit || rows.length);
@@ -277,84 +380,199 @@ router.get('/search', async (req, res) => {
       type SearchSummaryRow = {
         product_id: number;
         item_code: string;
-        chain_name: string | null;
         min_price: Prisma.Decimal | null;
         min_effective_price: Prisma.Decimal | null;
         has_promo: boolean | null;
+        available_chains: string[] | null;
+        best_promo_price: Prisma.Decimal | null;
+        best_promo_chain_id: string | null;
+        best_promo_store_id: string | null;
+        best_promo_promotion_id: string | null;
+        best_promo_description: string | null;
+        best_promo_end_date: Date | string | null;
+        best_promo_additional_is_coupon: string | null;
+        best_promo_additional_restrictions: string | null;
+        best_promo_club_id: string | null;
       };
 
       const productIds = rows.map((row) => row.product_id);
       const tSummarySql = process.hrtime.bigint();
+      const canUseStorePromoCache = await hasStorePromoCache();
+      summarySource = canUseStorePromoCache ? 'promoCache' : 'live';
+      const promoJoinSql = canUseStorePromoCache
+        ? Prisma.sql`
+            LEFT JOIN product_store_current_promos pb
+              ON pb.product_id = pp.product_id
+             AND pb.store_id = pp.store_id
+          `
+        : Prisma.sql`
+            LEFT JOIN LATERAL (
+              SELECT MIN(psi.promo_price) AS promo_price
+                , (ARRAY_AGG(psi.chain_id ORDER BY psi.promo_price ASC NULLS LAST, psi.updated_at DESC NULLS LAST, psi.promotion_id ASC))[1] AS chain_id
+                , (ARRAY_AGG(psi.promotion_id ORDER BY psi.promo_price ASC NULLS LAST, psi.updated_at DESC NULLS LAST, psi.promotion_id ASC))[1] AS promotion_id
+                , (ARRAY_AGG(p.promotion_description ORDER BY psi.promo_price ASC NULLS LAST, psi.updated_at DESC NULLS LAST, psi.promotion_id ASC))[1] AS promotion_description
+                , (ARRAY_AGG(psi.promotion_end_date ORDER BY psi.promo_price ASC NULLS LAST, psi.updated_at DESC NULLS LAST, psi.promotion_id ASC))[1] AS promotion_end_date
+                , (ARRAY_AGG(p.additional_is_coupon ORDER BY psi.promo_price ASC NULLS LAST, psi.updated_at DESC NULLS LAST, psi.promotion_id ASC))[1] AS additional_is_coupon
+                , (ARRAY_AGG(p.additional_restrictions ORDER BY psi.promo_price ASC NULLS LAST, psi.updated_at DESC NULLS LAST, psi.promotion_id ASC))[1] AS additional_restrictions
+                , (ARRAY_AGG(p.club_id ORDER BY psi.promo_price ASC NULLS LAST, psi.updated_at DESC NULLS LAST, psi.promotion_id ASC))[1] AS club_id
+              FROM promotion_store_items psi
+              LEFT JOIN promotions p
+                ON p.chain_id = psi.chain_id
+               AND p.promotion_id = psi.promotion_id
+              WHERE psi.product_id = pp.product_id
+                AND psi.store_id = pp.store_id
+                AND psi.promo_price IS NOT NULL
+                AND (psi.promotion_end_date IS NULL OR psi.promotion_end_date >= CURRENT_DATE)
+              ) pb ON TRUE
+          `;
       const summaryRows = await prisma.$queryRaw<SearchSummaryRow[]>(Prisma.sql`
-        WITH selected_products AS (
-          SELECT unnest(${productIds}::int[]) AS product_id
-        ),
-        priced_rows AS (
-          SELECT
-            sp.product_id,
-            p.item_code,
-            COALESCE(NULLIF(s.chain_name, ''), s.chain_id)::text AS chain_name,
-            pp.price,
-            LEAST(pp.price, COALESCE(pb.promo_price, pp.promo_price, pp.price)) AS effective_price,
-            (
-              COALESCE(pb.promo_price, pp.promo_price) IS NOT NULL
-              AND COALESCE(pb.promo_price, pp.promo_price) < pp.price
-              AND COALESCE(pb.promo_price, pp.promo_price) >= (pp.price * 0.05)
-            ) AS has_promo
-          FROM selected_products sp
-          JOIN products p ON p.id = sp.product_id
-          JOIN product_prices pp ON pp.product_id = sp.product_id
-          JOIN stores s ON s.id = pp.store_id
-          LEFT JOIN LATERAL (
-            SELECT MIN(psi.promo_price) AS promo_price
-            FROM promotion_store_items psi
-            WHERE psi.product_id = pp.product_id
-              AND psi.store_id = pp.store_id
-              AND psi.promo_price IS NOT NULL
-              AND (psi.promotion_end_date IS NULL OR psi.promotion_end_date >= CURRENT_DATE)
-          ) pb ON TRUE
-          WHERE pp.price IS NOT NULL
-            AND (${city || null}::text IS NULL OR s.city ILIKE ${city || null}::text || '%')
-            AND (${chainId || null}::text IS NULL OR s.chain_id = ${chainId || null}::text)
-            AND (${storeId || null}::text IS NULL OR s.store_id = ${storeId || null}::text)
-        )
-        SELECT
-          product_id,
-          item_code,
-          chain_name,
-          MIN(price) AS min_price,
-          MIN(effective_price) AS min_effective_price,
-          BOOL_OR(has_promo) AS has_promo
-        FROM priced_rows
-        GROUP BY product_id, item_code, chain_name
-      `);
+            WITH selected_products AS (
+              SELECT unnest(${productIds}::int[]) AS product_id
+            ),
+            city_stores AS MATERIALIZED (
+              SELECT
+                id,
+                chain_id,
+                store_id,
+                COALESCE(NULLIF(chain_name, ''), chain_id)::text AS chain_name
+              FROM stores
+              WHERE (${city || null}::text IS NULL OR city = ${city || null}::text OR city ILIKE ${city || null}::text || '%')
+                AND (${chainId || null}::text IS NULL OR chain_id = ${chainId || null}::text)
+                AND (${storeId || null}::text IS NULL OR store_id = ${storeId || null}::text)
+            ),
+            priced_rows AS (
+              SELECT
+                sp.product_id,
+                p.item_code,
+                cs.chain_name,
+                cs.chain_id,
+                cs.store_id,
+                pp.price,
+                COALESCE(pb.promo_price, pp.promo_price) AS promo_price,
+                COALESCE(pb.chain_id, cs.chain_id) AS promo_chain_id,
+                pb.promotion_id,
+                pb.promotion_description,
+                pb.promotion_end_date,
+                pb.additional_is_coupon,
+                pb.additional_restrictions,
+                pb.club_id,
+                LEAST(pp.price, COALESCE(pb.promo_price, pp.promo_price, pp.price)) AS effective_price,
+                (
+                  COALESCE(pb.promo_price, pp.promo_price) IS NOT NULL
+                  AND COALESCE(pb.promo_price, pp.promo_price) < pp.price
+                  AND COALESCE(pb.promo_price, pp.promo_price) >= (pp.price * 0.05)
+                ) AS has_promo
+              FROM selected_products sp
+              JOIN products p ON p.id = sp.product_id
+              JOIN city_stores cs ON TRUE
+              JOIN product_prices pp ON pp.product_id = sp.product_id AND pp.store_id = cs.id
+              ${promoJoinSql}
+              WHERE pp.price IS NOT NULL
+            ),
+            chain_rows AS (
+              SELECT
+                product_id,
+                item_code,
+                chain_name,
+                MIN(price) AS min_price,
+                MIN(effective_price) AS min_effective_price,
+                BOOL_OR(has_promo) AS has_promo
+              FROM priced_rows
+              GROUP BY product_id, item_code, chain_name
+            ),
+            best_promo AS (
+              SELECT DISTINCT ON (product_id)
+                product_id,
+                promo_price AS best_promo_price,
+                promo_chain_id AS best_promo_chain_id,
+                store_id AS best_promo_store_id,
+                promotion_id AS best_promo_promotion_id,
+                promotion_description AS best_promo_description,
+                promotion_end_date AS best_promo_end_date,
+                additional_is_coupon AS best_promo_additional_is_coupon,
+                additional_restrictions AS best_promo_additional_restrictions,
+                club_id AS best_promo_club_id
+              FROM priced_rows
+              WHERE promo_price IS NOT NULL
+                AND price IS NOT NULL
+                AND promo_price < price
+                AND promo_price >= (price * 0.05)
+              ORDER BY product_id, promo_price ASC NULLS LAST, price DESC NULLS LAST
+            )
+            SELECT
+              cr.product_id,
+              cr.item_code,
+              MIN(cr.min_price) AS min_price,
+              MIN(cr.min_effective_price) AS min_effective_price,
+              BOOL_OR(cr.has_promo) AS has_promo,
+              ARRAY_AGG(cr.chain_name ORDER BY cr.chain_name) FILTER (WHERE cr.chain_name IS NOT NULL) AS available_chains,
+              bp.best_promo_price,
+              bp.best_promo_chain_id,
+              bp.best_promo_store_id,
+              bp.best_promo_promotion_id,
+              bp.best_promo_description,
+              bp.best_promo_end_date,
+              bp.best_promo_additional_is_coupon,
+              bp.best_promo_additional_restrictions,
+              bp.best_promo_club_id
+            FROM chain_rows cr
+            LEFT JOIN best_promo bp ON bp.product_id = cr.product_id
+            GROUP BY
+              cr.product_id,
+              cr.item_code,
+              bp.best_promo_price,
+              bp.best_promo_chain_id,
+              bp.best_promo_store_id,
+              bp.best_promo_promotion_id,
+              bp.best_promo_description,
+              bp.best_promo_end_date,
+              bp.best_promo_additional_is_coupon,
+              bp.best_promo_additional_restrictions,
+              bp.best_promo_club_id
+          `);
       timingsMs.summarySql = elapsedMs(tSummarySql);
 
       for (const row of summaryRows) {
-        const existing = summaryByItemCode.get(row.item_code);
-        const nextMinPrice = row.min_price !== null ? Number(row.min_price) : null;
-        const nextEffectivePrice = row.min_effective_price !== null ? Number(row.min_effective_price) : null;
+        const hasBestPromo = row.best_promo_price !== null
+          && row.best_promo_chain_id
+          && row.best_promo_store_id;
+        const classifiedPromo = hasBestPromo
+          ? classifyPromotionKind({
+              promotion_description: row.best_promo_description,
+              additional_is_coupon: row.best_promo_additional_is_coupon,
+              additional_restrictions: row.best_promo_additional_restrictions,
+              club_id: row.best_promo_club_id,
+            })
+          : null;
 
-        if (!existing) {
-          summaryByItemCode.set(row.item_code, {
-            minPrice: nextMinPrice,
-            effectivePrice: nextEffectivePrice,
-            hasPromo: Boolean(row.has_promo),
-            availableChains: row.chain_name ? [row.chain_name] : [],
-          });
-          continue;
-        }
-
-        if (nextMinPrice !== null && (existing.minPrice === null || nextMinPrice < existing.minPrice)) {
-          existing.minPrice = nextMinPrice;
-        }
-        if (nextEffectivePrice !== null && (existing.effectivePrice === null || nextEffectivePrice < existing.effectivePrice)) {
-          existing.effectivePrice = nextEffectivePrice;
-        }
-        existing.hasPromo = existing.hasPromo || Boolean(row.has_promo);
-        if (row.chain_name && !existing.availableChains.includes(row.chain_name)) {
-          existing.availableChains.push(row.chain_name);
-        }
+        summaryByItemCode.set(row.item_code, {
+          minPrice: row.min_price !== null ? Number(row.min_price) : null,
+          effectivePrice: row.min_effective_price !== null ? Number(row.min_effective_price) : null,
+          hasPromo: Boolean(row.has_promo),
+          availableChains: row.available_chains ?? [],
+          promotion: hasBestPromo && classifiedPromo
+            ? {
+                id: `${row.item_code}-${row.best_promo_store_id}-summary-promo`,
+                promotion_id: row.best_promo_promotion_id ?? `promo-${row.best_promo_chain_id}-${row.best_promo_store_id}`,
+                promotion_description: row.best_promo_description,
+                promotion_start_date: '1970-01-01',
+                promotion_end_date: row.best_promo_end_date
+                  ? new Date(row.best_promo_end_date).toISOString().slice(0, 10)
+                  : '2999-12-31',
+                club_id: null,
+                chain_id: row.best_promo_chain_id!,
+                discounted_price: row.best_promo_price!.toString(),
+                discount_rate: null,
+                min_qty: null,
+                max_qty: null,
+                available_in_store_ids: [row.best_promo_store_id!],
+                matched_item_code: row.item_code,
+                promotion_type: classifiedPromo.promoKind,
+                promotion_badge_label: classifiedPromo.promoLabel,
+                is_conditional_promo: classifiedPromo.isConditionalPromo,
+              }
+            : null,
+        });
       }
     }
 
@@ -377,7 +595,9 @@ router.get('/search', async (req, res) => {
         : summaryByItemCode.get(row.item_code)
         ? {
             prices: [],
-            promotions: [],
+            promotions: summaryByItemCode.get(row.item_code)!.promotion
+              ? [summaryByItemCode.get(row.item_code)!.promotion!]
+              : [],
             detailsLoaded: false,
             hasPromo: summaryByItemCode.get(row.item_code)!.hasPromo,
             minPrice: summaryByItemCode.get(row.item_code)!.minPrice !== null
@@ -441,6 +661,7 @@ router.get('/search', async (req, res) => {
       offset,
       rowCount: rows.length,
       filteredCount: filteredProducts.length,
+      summarySource,
       timingsMs: safeTimingsMs,
     });
 
