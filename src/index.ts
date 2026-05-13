@@ -13,6 +13,7 @@ import scanRouter from './routes/scan';
 import offersRouter from './routes/offers';
 import shoppingListsRouter from './routes/shoppingLists';
 import shareRouter from './routes/share';
+import shortLinksRouter from './routes/shortLinks';
 import translateRouter from './routes/translate';
 import observationsRouter from './routes/observations';
 
@@ -92,6 +93,7 @@ app.use('/api/lists', shoppingListsRouter);
 app.use('/api/auth', authRouter);
 app.use('/api/user', userRouter);
 app.use('/api/observations', observationsRouter);
+app.use(shortLinksRouter);
 app.use('/share', shareRouter);
 app.use('/translate', translateRouter);
 app.use('/api/translate', translateRouter);

@@ -1,8 +1,13 @@
 import { Router, Request, Response } from 'express';
 import { PrismaClient } from '@prisma/client';
-import { getCatalogImageUrl } from '../utils/media';
 import {
+  generatePromoShareImage,
+  generatePromotionsShareImage,
   generateProductShareImage,
+  generateShoppingListShareImage,
+  generateSiteShareImage,
+  getPromoShareMeta,
+  getPromotionsShareMeta,
   getProductShareMeta,
   parseShareLang,
   parseShareTheme,
@@ -12,13 +17,6 @@ import {
 
 const router = Router();
 const prisma = new PrismaClient();
-
-// Use the first catalog product image as the OG preview.
-function buildOgImageUrl(productIds: string[]): string {
-  const ids = productIds.filter(Boolean);
-  const bgId = ids[0] || 'p_01_01_001';
-  return getCatalogImageUrl(bgId) ?? '';
-}
 
 // Escape HTML entities to prevent injection in the OG HTML page
 function esc(str: string): string {
@@ -35,39 +33,58 @@ function getBackendBaseUrl(req: Request): string {
   return `${protocol}://${host}`;
 }
 
-router.get('/product/:barcode/image', async (req: Request, res: Response) => {
-  const { barcode } = req.params;
-  const city = typeof req.query.city === 'string' ? req.query.city.trim() : '';
-  const theme = parseShareTheme(req.query.theme);
-  const lang = parseShareLang(req.query.lang);
+function shortString(raw: unknown): string {
+  return typeof raw === 'string' ? raw.trim() : '';
+}
 
-  try {
-    const png = await generateProductShareImage(prisma, barcode, city, theme, lang);
-    res.setHeader('Content-Type', 'image/png');
-    res.setHeader('Cache-Control', 'public, max-age=3600');
-    return res.send(png);
-  } catch (error) {
-    console.error('[GET /share/product/:barcode/image]', error);
-    return res.status(500).json({ error: 'Failed to generate share image' });
-  }
-});
+function parseShortTheme(raw: unknown): 'dark' | 'light' {
+  const value = shortString(raw).toLowerCase();
+  if (value === 'l') return 'light';
+  if (value === 'd') return 'dark';
+  return parseShareTheme(raw);
+}
 
-router.get('/product/:barcode', async (req: Request, res: Response) => {
-  const { barcode } = req.params;
-  const city = typeof req.query.city === 'string' ? req.query.city.trim() : '';
-  const theme = parseShareTheme(req.query.theme);
-  const lang = parseShareLang(req.query.lang);
+function parseShortLang(raw: unknown) {
+  return parseShareLang(raw);
+}
+
+function buildProductImageParams(city: string, theme: string, lang: string): URLSearchParams {
+  const params = new URLSearchParams();
+  if (city) params.set('city', city);
+  params.set('theme', theme);
+  params.set('lang', lang);
+  return params;
+}
+
+function buildPromoImageParams(input: {
+  city: string;
+  chainId: string;
+  storeId: string;
+  promotionId: string;
+  theme: string;
+  lang: string;
+}): URLSearchParams {
+  const params = new URLSearchParams();
+  if (input.chainId) params.set('chainId', input.chainId);
+  if (input.storeId) params.set('storeId', input.storeId);
+  if (input.promotionId) params.set('promotionId', input.promotionId);
+  if (input.city) params.set('city', input.city);
+  params.set('theme', input.theme);
+  params.set('lang', input.lang);
+  return params;
+}
+
+async function sendProductSharePage(req: Request, res: Response, barcode: string) {
+  const city = shortString(req.query.city) || shortString(req.query.c);
+  const theme = parseShortTheme(req.query.theme ?? req.query.t);
+  const lang = parseShortLang(req.query.lang ?? req.query.l);
   const FRONTEND_URL = process.env.FRONTEND_URL || 'https://agali.live';
   const redirectTarget = `${FRONTEND_URL}/product/${encodeURIComponent(barcode)}`;
 
   try {
     const meta = await getProductShareMeta(prisma, barcode, city);
     const backendBaseUrl = getBackendBaseUrl(req);
-    const params = new URLSearchParams();
-    if (city) params.set('city', city);
-    params.set('theme', theme);
-    params.set('lang', lang);
-    const imageUrl = `${backendBaseUrl}/share/product/${encodeURIComponent(barcode)}/image?${params.toString()}`;
+    const imageUrl = `${backendBaseUrl}/share/product/${encodeURIComponent(barcode)}/image?${buildProductImageParams(city, theme, lang).toString()}`;
 
     const bestPrice = meta.offers[0]?.effectivePrice ?? meta.offers[0]?.price;
     const title = esc(`${meta.itemName} • Agali`);
@@ -108,8 +125,294 @@ router.get('/product/:barcode', async (req: Request, res: Response) => {
 </body>
 </html>`);
   } catch (error) {
-    console.error('[GET /share/product/:barcode]', error);
+    console.error('[GET /share/product]', error);
     return res.redirect(redirectTarget);
+  }
+}
+
+async function sendPromoSharePage(req: Request, res: Response, itemCode: string) {
+  const theme = parseShortTheme(req.query.theme ?? req.query.t);
+  const lang = parseShortLang(req.query.lang ?? req.query.l);
+  const chainId = shortString(req.query.chainId) || shortString(req.query.ch);
+  const chainName = shortString(req.query.chainName) || shortString(req.query.cn);
+  const storeId = shortString(req.query.storeId) || shortString(req.query.s);
+  const promotionId = shortString(req.query.promotionId) || shortString(req.query.pr);
+  const city = shortString(req.query.city) || shortString(req.query.c);
+  const FRONTEND_URL = process.env.FRONTEND_URL || 'https://agali.live';
+
+  const frontendParams = new URLSearchParams();
+  if (city) frontendParams.set('city', city);
+  if (chainId) frontendParams.set('chainId', chainId);
+  if (chainName) frontendParams.set('chainName', chainName);
+  if (storeId) frontendParams.set('storeId', storeId);
+  frontendParams.set('promoItem', itemCode);
+  if (promotionId) frontendParams.set('promotionId', promotionId);
+  const redirectTarget = `${FRONTEND_URL}/promotions?${frontendParams.toString()}`;
+
+  try {
+    const meta = chainId ? await getPromoShareMeta(prisma, { itemCode, chainId, storeId, promotionId, city }) : null;
+    const backendBaseUrl = getBackendBaseUrl(req);
+    const imageUrl = `${backendBaseUrl}/share/promo/${encodeURIComponent(itemCode)}/image?${buildPromoImageParams({ city, chainId, storeId, promotionId, theme, lang }).toString()}`;
+    const title = esc(`${meta?.itemName || itemCode} • Agali`);
+    const description = esc(meta?.effectivePrice ? `${meta.chainName} • ₪${meta.effectivePrice.toFixed(2)}${city ? ` • ${city}` : ''}` : 'Promotion sur Agali');
+    const safeRedirect = esc(redirectTarget);
+    const safeImage = esc(imageUrl);
+
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.setHeader('Cache-Control', 'public, max-age=60');
+    return res.send(`<!DOCTYPE html>
+<html lang="${lang}" dir="${lang === 'he' ? 'rtl' : 'ltr'}">
+<head>
+  <meta charset="utf-8" />
+  <title>${title}</title>
+  <meta property="og:type" content="website" />
+  <meta property="og:title" content="${title}" />
+  <meta property="og:description" content="${description}" />
+  <meta property="og:image" content="${safeImage}" />
+  <meta property="og:image:type" content="image/png" />
+  <meta property="og:image:width" content="${SHARE_IMAGE_WIDTH}" />
+  <meta property="og:image:height" content="${SHARE_IMAGE_HEIGHT}" />
+  <meta property="og:url" content="${safeRedirect}" />
+  <meta property="og:site_name" content="Agali" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <meta name="twitter:title" content="${title}" />
+  <meta name="twitter:description" content="${description}" />
+  <meta name="twitter:image" content="${safeImage}" />
+  <meta http-equiv="refresh" content="0;url=${safeRedirect}" />
+</head>
+<body>
+  <script>window.location.replace("${safeRedirect}");</script>
+  <p>Redirecting...</p>
+</body>
+</html>`);
+  } catch (error) {
+    console.error('[GET /share/promo]', error);
+    return res.redirect(redirectTarget);
+  }
+}
+
+router.get('/product/:barcode/image', async (req: Request, res: Response) => {
+  const { barcode } = req.params;
+  const city = typeof req.query.city === 'string' ? req.query.city.trim() : '';
+  const theme = parseShareTheme(req.query.theme);
+  const lang = parseShareLang(req.query.lang);
+
+  try {
+    const png = await generateProductShareImage(prisma, barcode, city, theme, lang);
+    res.setHeader('Content-Type', 'image/png');
+    res.setHeader('Cache-Control', 'public, max-age=3600');
+    return res.send(png);
+  } catch (error) {
+    console.error('[GET /share/product/:barcode/image]', error);
+    return res.status(500).json({ error: 'Failed to generate share image' });
+  }
+});
+
+router.get('/p/:barcode', async (req: Request, res: Response) => {
+  return sendProductSharePage(req, res, req.params.barcode);
+});
+
+router.get('/product/:barcode', async (req: Request, res: Response) => {
+  return sendProductSharePage(req, res, req.params.barcode);
+});
+
+router.get('/site/image', async (req: Request, res: Response) => {
+  const theme = parseShareTheme(req.query.theme);
+  const lang = parseShareLang(req.query.lang);
+
+  try {
+    const png = await generateSiteShareImage(theme, lang);
+    res.setHeader('Content-Type', 'image/png');
+    res.setHeader('Cache-Control', 'public, max-age=86400');
+    return res.send(png);
+  } catch (error) {
+    console.error('[GET /share/site/image]', error);
+    return res.status(500).json({ error: 'Failed to generate site share image' });
+  }
+});
+
+router.get('/site', async (req: Request, res: Response) => {
+  const theme = parseShareTheme(req.query.theme);
+  const lang = parseShareLang(req.query.lang);
+  const FRONTEND_URL = process.env.FRONTEND_URL || 'https://agali.live';
+  const backendBaseUrl = getBackendBaseUrl(req);
+  const imageUrl = `${backendBaseUrl}/share/site/image?theme=${encodeURIComponent(theme)}&lang=${encodeURIComponent(lang)}`;
+  const title = esc('Agali • Comparateur de prix et promotions');
+  const description = esc('Compare les prix, trouve les meilleures promotions et partage tes listes de courses.');
+  const safeRedirect = esc(FRONTEND_URL);
+  const safeImage = esc(imageUrl);
+
+  res.setHeader('Content-Type', 'text/html; charset=utf-8');
+  res.setHeader('Cache-Control', 'public, max-age=3600');
+  return res.send(`<!DOCTYPE html>
+<html lang="${lang}" dir="${lang === 'he' ? 'rtl' : 'ltr'}">
+<head>
+  <meta charset="utf-8" />
+  <title>${title}</title>
+  <meta property="og:type" content="website" />
+  <meta property="og:title" content="${title}" />
+  <meta property="og:description" content="${description}" />
+  <meta property="og:image" content="${safeImage}" />
+  <meta property="og:image:type" content="image/png" />
+  <meta property="og:image:width" content="${SHARE_IMAGE_WIDTH}" />
+  <meta property="og:image:height" content="${SHARE_IMAGE_HEIGHT}" />
+  <meta property="og:url" content="${safeRedirect}" />
+  <meta property="og:site_name" content="Agali" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <meta name="twitter:title" content="${title}" />
+  <meta name="twitter:description" content="${description}" />
+  <meta name="twitter:image" content="${safeImage}" />
+  <meta http-equiv="refresh" content="0;url=${safeRedirect}" />
+</head>
+<body>
+  <script>window.location.replace("${safeRedirect}");</script>
+  <p>Redirecting...</p>
+</body>
+</html>`);
+});
+
+router.get('/promo/:itemCode/image', async (req: Request, res: Response) => {
+  const { itemCode } = req.params;
+  const theme = parseShareTheme(req.query.theme);
+  const lang = parseShareLang(req.query.lang);
+  const chainId = typeof req.query.chainId === 'string' ? req.query.chainId.trim() : '';
+  const storeId = typeof req.query.storeId === 'string' ? req.query.storeId.trim() : '';
+  const promotionId = typeof req.query.promotionId === 'string' ? req.query.promotionId.trim() : '';
+  const city = typeof req.query.city === 'string' ? req.query.city.trim() : '';
+
+  if (!chainId) return res.status(400).json({ error: 'chainId is required' });
+
+  try {
+    const png = await generatePromoShareImage(prisma, { itemCode, chainId, storeId, promotionId, city }, theme, lang);
+    res.setHeader('Content-Type', 'image/png');
+    res.setHeader('Cache-Control', 'public, max-age=1800');
+    return res.send(png);
+  } catch (error) {
+    console.error('[GET /share/promo/:itemCode/image]', error);
+    return res.status(500).json({ error: 'Failed to generate promo share image' });
+  }
+});
+
+router.get('/d/:itemCode', async (req: Request, res: Response) => {
+  return sendPromoSharePage(req, res, req.params.itemCode);
+});
+
+router.get('/promo/:itemCode', async (req: Request, res: Response) => {
+  return sendPromoSharePage(req, res, req.params.itemCode);
+});
+
+router.get('/promotions/image', async (req: Request, res: Response) => {
+  const theme = parseShareTheme(req.query.theme);
+  const lang = parseShareLang(req.query.lang);
+  const city = typeof req.query.city === 'string' ? req.query.city.trim() : '';
+  const chainId = typeof req.query.chainId === 'string' ? req.query.chainId.trim() : '';
+  const chainName = typeof req.query.chainName === 'string' ? req.query.chainName.trim() : '';
+  const storeId = typeof req.query.storeId === 'string' ? req.query.storeId.trim() : '';
+
+  if (!city) return res.status(400).json({ error: 'city is required' });
+
+  try {
+    const png = await generatePromotionsShareImage(prisma, { city, chainId, chainName, storeId }, theme, lang);
+    res.setHeader('Content-Type', 'image/png');
+    res.setHeader('Cache-Control', 'public, max-age=1800');
+    return res.send(png);
+  } catch (error) {
+    console.error('[GET /share/promotions/image]', error);
+    return res.status(500).json({ error: 'Failed to generate promotions share image' });
+  }
+});
+
+router.get('/promotions', async (req: Request, res: Response) => {
+  const theme = parseShareTheme(req.query.theme);
+  const lang = parseShareLang(req.query.lang);
+  const city = typeof req.query.city === 'string' ? req.query.city.trim() : '';
+  const chainId = typeof req.query.chainId === 'string' ? req.query.chainId.trim() : '';
+  const chainName = typeof req.query.chainName === 'string' ? req.query.chainName.trim() : '';
+  const storeId = typeof req.query.storeId === 'string' ? req.query.storeId.trim() : '';
+  const FRONTEND_URL = process.env.FRONTEND_URL || 'https://agali.live';
+
+  const frontendParams = new URLSearchParams();
+  if (city) frontendParams.set('city', city);
+  if (chainId) frontendParams.set('chainId', chainId);
+  if (chainName) frontendParams.set('chainName', chainName);
+  if (storeId) frontendParams.set('storeId', storeId);
+  const redirectTarget = `${FRONTEND_URL}/promotions${frontendParams.toString() ? `?${frontendParams.toString()}` : ''}`;
+
+  try {
+    const meta = city ? await getPromotionsShareMeta(prisma, { city, chainId, chainName, storeId }) : null;
+    const backendBaseUrl = getBackendBaseUrl(req);
+    const imageParams = new URLSearchParams();
+    if (city) imageParams.set('city', city);
+    if (chainId) imageParams.set('chainId', chainId);
+    if (chainName) imageParams.set('chainName', chainName);
+    if (storeId) imageParams.set('storeId', storeId);
+    imageParams.set('theme', theme);
+    imageParams.set('lang', lang);
+    const imageUrl = city
+      ? `${backendBaseUrl}/share/promotions/image?${imageParams.toString()}`
+      : `${backendBaseUrl}/share/site/image?theme=${encodeURIComponent(theme)}&lang=${encodeURIComponent(lang)}`;
+    const title = esc(`${meta?.title || 'Promotions'} • Agali`);
+    const description = esc(city ? `Les meilleures promotions Agali${meta?.title ? ` • ${meta.title}` : ''}` : 'Les meilleures promotions sur Agali');
+    const safeRedirect = esc(redirectTarget);
+    const safeImage = esc(imageUrl);
+
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.setHeader('Cache-Control', 'public, max-age=60');
+    return res.send(`<!DOCTYPE html>
+<html lang="${lang}" dir="${lang === 'he' ? 'rtl' : 'ltr'}">
+<head>
+  <meta charset="utf-8" />
+  <title>${title}</title>
+  <meta property="og:type" content="website" />
+  <meta property="og:title" content="${title}" />
+  <meta property="og:description" content="${description}" />
+  <meta property="og:image" content="${safeImage}" />
+  <meta property="og:image:type" content="image/png" />
+  <meta property="og:image:width" content="${SHARE_IMAGE_WIDTH}" />
+  <meta property="og:image:height" content="${SHARE_IMAGE_HEIGHT}" />
+  <meta property="og:url" content="${safeRedirect}" />
+  <meta property="og:site_name" content="Agali" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <meta name="twitter:title" content="${title}" />
+  <meta name="twitter:description" content="${description}" />
+  <meta name="twitter:image" content="${safeImage}" />
+  <meta http-equiv="refresh" content="0;url=${safeRedirect}" />
+</head>
+<body>
+  <script>window.location.replace("${safeRedirect}");</script>
+  <p>Redirecting...</p>
+</body>
+</html>`);
+  } catch (error) {
+    console.error('[GET /share/promotions]', error);
+    return res.redirect(redirectTarget);
+  }
+});
+
+router.get('/:code/image', async (req: Request, res: Response) => {
+  const { code } = req.params;
+  const theme = parseShareTheme(req.query.theme);
+  const lang = parseShareLang(req.query.lang);
+
+  try {
+    const rows = await prisma.$queryRawUnsafe<{ name: string; items: unknown }[]>(
+      `SELECT name, items FROM shopping_lists WHERE code = $1 LIMIT 1`,
+      code.toUpperCase()
+    );
+
+    if (rows.length === 0) {
+      return res.redirect(302, `${getBackendBaseUrl(req)}/share/site/image?theme=${encodeURIComponent(theme)}&lang=${encodeURIComponent(lang)}`);
+    }
+
+    const { name, items } = rows[0];
+    const rawItems = typeof items === 'string' ? JSON.parse(items) : items;
+    const png = await generateShoppingListShareImage(name, rawItems, theme, lang);
+    res.setHeader('Content-Type', 'image/png');
+    res.setHeader('Cache-Control', 'public, max-age=60');
+    return res.send(png);
+  } catch (error) {
+    console.error('[GET /share/:code/image]', error);
+    return res.status(500).json({ error: 'Failed to generate shopping list share image' });
   }
 });
 
@@ -134,9 +437,8 @@ router.get('/:code', async (req: Request, res: Response) => {
     const rawItems = typeof items === 'string' ? JSON.parse(items) : items;
     const itemsArr: Array<{ productId?: string }> = Array.isArray(rawItems) ? rawItems : [];
     const count = itemsArr.length;
-    const productIds = itemsArr.slice(0, 4).map((i) => i.productId ?? '').filter(Boolean);
-
-    const ogImage = buildOgImageUrl(productIds);
+    const backendBaseUrl = getBackendBaseUrl(req);
+    const ogImage = `${backendBaseUrl}/share/${encodeURIComponent(code.toUpperCase())}/image?theme=dark&lang=he`;
     const title = esc(`🛒 ${name}`);
     const description = esc(
       count > 0
@@ -159,9 +461,9 @@ router.get('/:code', async (req: Request, res: Response) => {
   <meta property="og:title" content="${title}" />
   <meta property="og:description" content="${description}" />
   <meta property="og:image" content="${safeImage}" />
-  <meta property="og:image:type" content="image/jpeg" />
-  <meta property="og:image:width" content="1200" />
-  <meta property="og:image:height" content="630" />
+  <meta property="og:image:type" content="image/png" />
+  <meta property="og:image:width" content="${SHARE_IMAGE_WIDTH}" />
+  <meta property="og:image:height" content="${SHARE_IMAGE_HEIGHT}" />
   <meta property="og:url" content="${safeRedirect}" />
   <meta property="og:site_name" content="Agali" />
   <meta name="twitter:card" content="summary_large_image" />
