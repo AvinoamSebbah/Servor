@@ -867,14 +867,14 @@ function getSocialCopy(lang: ShareLang) {
     productTitle: 'המחיר הטוב ביותר ב-Agali',
     listEyebrow: 'רשימת קניות משותפת',
     listTitle: 'קניות חכמות ביחד',
-    promoEyebrow: 'מבצע חם',
-    promosEyebrow: 'מבצעים חזקים בחנויות',
-    siteTitle: 'Agali',
-    siteSubtitle: 'משווים מחירים, מוצאים מבצעים ומשתפים רשימות קניות.',
+      promoEyebrow: 'מבצע חם',
+      promosEyebrow: 'מבצעים חזקים בחנויות',
+      siteTitle: 'Agali',
+      siteSubtitle: 'משווים מחירים, מוצאים מבצעים ומשתפים רשימות קניות.',
     chainCount: '30+ רשתות שיווק',
     chainCountNumber: '30+',
     chainCountLabel: 'רשתות שיווק',
-    openCta: 'פתיחה ב-agali.live',
+    openCta: 'פתחו את agali.live',
     items: 'פריטים',
     stores: 'חנויות',
     bestDeals: 'ההצעות הכי טובות',
@@ -948,12 +948,14 @@ function socialFrame({
   fontCss,
   logoDataUri,
   body,
+  showHeader = true,
 }: {
   theme: ShareTheme;
   lang: ShareLang;
   fontCss: string;
   logoDataUri: string | null;
   body: string;
+  showHeader?: boolean;
 }): string {
   const p = socialPalette(theme);
   const dir = lang === 'he' ? 'rtl' : 'ltr';
@@ -982,11 +984,11 @@ function socialFrame({
     <rect x="44" y="34" width="1112" height="562" rx="34" fill="${theme === 'light' ? 'rgba(255,255,255,0.54)' : 'rgba(255,255,255,0.035)'}" stroke="${p.border}" />
 
     <g direction="${dir}">
-      <g transform="translate(72 56)">
-        ${logoDataUri ? `<image href="${logoDataUri}" x="0" y="-8" width="78" height="78" preserveAspectRatio="xMidYMid meet" />` : `<rect x="0" y="0" width="62" height="62" rx="16" fill="url(#brandGradient)" />`}
-        <text x="92" y="30" font-size="34" font-weight="900" fill="${p.text}" font-family="Rubik, sans-serif">Agali</text>
-        <text x="92" y="56" font-size="15" font-weight="700" fill="${p.muted}" font-family="Rubik, sans-serif">agali.live</text>
-      </g>
+      ${showHeader ? `<g>
+        ${logoDataUri ? `<image href="${logoDataUri}" x="1018" y="46" width="96" height="96" preserveAspectRatio="xMidYMid meet" />` : `<rect x="1034" y="58" width="72" height="72" rx="18" fill="url(#brandGradient)" />`}
+        <text x="1004" y="88" text-anchor="end" font-size="48" font-weight="900" fill="${p.text}" font-family="Rubik, sans-serif">Agali</text>
+        <text x="1004" y="119" text-anchor="end" font-size="17" font-weight="800" fill="${p.muted}" font-family="Rubik, sans-serif">agali.live</text>
+      </g>` : ''}
       ${body}
     </g>
   </svg>`;
@@ -1159,58 +1161,43 @@ export async function generateProductShareImage(
     getProductShareMeta(prisma, barcode, city),
     productImageDataUri(barcode),
   ]);
-  const titleLines = splitLinesStrict(meta.itemName, 24, 2);
-  const titleSize = fitFontSize(titleLines[0] || meta.itemName, 18, 46, 34);
-  const manufacturer = truncate(meta.manufacturerName || copy.productEyebrow, 30);
+  const titleLines = splitLinesStrict(meta.itemName, 25, 2);
+  const titleSize = fitFontSize(titleLines[0] || meta.itemName, 18, 50, 34);
   const topOffers = meta.offers.slice(0, 4);
-  const bestOffer = topOffers[0] ?? null;
-  const bestPrice = bestOffer ? (bestOffer.effectivePrice ?? bestOffer.promoPrice ?? bestOffer.price) : null;
-  const bestPriceText = compactNumber(bestPrice);
-  const bestPriceSize = priceFontSize(bestPrice, 62, 44);
-  const hasDiscount = Boolean(bestOffer?.price != null && bestOffer?.effectivePrice != null && bestOffer.effectivePrice < bestOffer.price);
-  const productCard = { x: 72, y: 158, w: 430, h: 374 };
-  const textX = 1088;
-  const titleY = titleLines.length > 1 ? 220 : 250;
+  const productCard = { x: 78, y: 150, w: 440, h: 392 };
+  const textX = 1092;
+  const titleY = titleLines.length > 1 ? 198 : 218;
+  const offerCardsStartY = titleLines.length > 1 ? titleY + titleSize + 30 : titleY + 62;
 
-  const comparisonDots = topOffers.slice(1, 4).map((offer, index) => {
+  const offerCards = topOffers.map((offer, index) => {
     const price = offer.effectivePrice ?? offer.promoPrice ?? offer.price;
-    const x = 562 + index * 168;
-    return `<g>
-      <rect x="${x}" y="506" width="146" height="54" rx="18" fill="${theme === 'light' ? '#ffffff' : 'rgba(255,255,255,0.06)'}" stroke="${p.border}" />
-      <clipPath id="miniOfferLogo${index}"><rect x="${x + 10}" y="514" width="38" height="38" rx="12" /></clipPath>
-      ${offer.logoDataUri ? `<image href="${offer.logoDataUri}" x="${x + 10}" y="514" width="38" height="38" preserveAspectRatio="xMidYMid slice" clip-path="url(#miniOfferLogo${index})" />` : `<rect x="${x + 10}" y="514" width="38" height="38" rx="12" fill="rgba(99,102,241,0.18)" />`}
-      <text x="${x + 134}" y="536" text-anchor="end" font-size="14" font-weight="700" fill="${p.muted}" font-family="Rubik, sans-serif">${escapeXml(truncate(offer.chainName, 10))}</text>
-      <text x="${x + 134}" y="555" text-anchor="end" font-size="17" font-weight="900" fill="${p.green}" font-family="Rubik, sans-serif">₪${escapeXml(compactNumber(price))}</text>
+    const col = index % 2;
+    const row = Math.floor(index / 2);
+    const x = 574 + col * 258;
+    const y = offerCardsStartY + row * 112;
+    const priceSize = priceFontSize(price, 42, 32);
+    return `<g filter="url(#softShadow)">
+      <rect x="${x}" y="${y}" width="228" height="92" rx="24" fill="${p.card}" stroke="${p.border}" />
+      <clipPath id="productOfferLogo${index}"><rect x="${x + 18}" y="${y + 18}" width="56" height="56" rx="16" /></clipPath>
+      ${offer.logoDataUri ? `<image href="${offer.logoDataUri}" x="${x + 18}" y="${y + 18}" width="56" height="56" preserveAspectRatio="xMidYMid slice" clip-path="url(#productOfferLogo${index})" />` : `<rect x="${x + 18}" y="${y + 18}" width="56" height="56" rx="16" fill="rgba(99,102,241,0.18)" />`}
+      <text x="${x + 204}" y="${y + 34}" text-anchor="end" font-size="16" font-weight="800" fill="${p.text}" font-family="Rubik, sans-serif">${escapeXml(truncate(offer.chainName, 13))}</text>
+      <text x="${x + 204}" y="${y + 70}" text-anchor="end" font-size="${priceSize}" font-weight="900" fill="${p.green}" font-family="Rubik, sans-serif">₪${escapeXml(compactNumber(price))}</text>
     </g>`;
   }).join('');
 
   const body = `
     <g filter="url(#softShadow)">
       <rect x="${productCard.x}" y="${productCard.y}" width="${productCard.w}" height="${productCard.h}" rx="36" fill="${p.card}" stroke="${p.border}" />
-      <rect x="${productCard.x + 28}" y="${productCard.y + 28}" width="${productCard.w - 56}" height="${productCard.h - 56}" rx="28" fill="#ffffff" stroke="${p.border}" />
+      <rect x="${productCard.x + 24}" y="${productCard.y + 24}" width="${productCard.w - 48}" height="${productCard.h - 48}" rx="30" fill="#ffffff" stroke="${p.border}" />
       ${mainImageDataUri
-        ? `<image href="${mainImageDataUri}" x="${productCard.x + 54}" y="${productCard.y + 58}" width="${productCard.w - 108}" height="${productCard.h - 116}" preserveAspectRatio="xMidYMid meet" />`
+        ? `<image href="${mainImageDataUri}" x="${productCard.x + 46}" y="${productCard.y + 50}" width="${productCard.w - 92}" height="${productCard.h - 100}" preserveAspectRatio="xMidYMid meet" />`
         : `<text x="${productCard.x + productCard.w / 2}" y="376" text-anchor="middle" font-size="112" font-weight="800" fill="url(#brandGradient)" font-family="Rubik, sans-serif">A</text>`}
     </g>
-    <text x="${textX}" y="174" text-anchor="end" font-size="17" font-weight="700" fill="${p.brand}" font-family="Rubik, sans-serif">${escapeXml(copy.productEyebrow)}</text>
     <text x="${textX}" y="${titleY}" text-anchor="end" font-size="${titleSize}" font-weight="800" fill="${p.text}" font-family="Rubik, sans-serif">${escapeXml(titleLines[0] || '')}</text>
     ${titleLines[1] ? `<text x="${textX}" y="${titleY + titleSize + 4}" text-anchor="end" font-size="${titleSize}" font-weight="800" fill="${p.text}" font-family="Rubik, sans-serif">${escapeXml(titleLines[1])}</text>` : ''}
-    <text x="${textX}" y="${titleY + (titleLines.length > 1 ? titleSize * 2 + 28 : titleSize + 28)}" text-anchor="end" font-size="21" font-weight="600" fill="${p.muted}" font-family="Rubik, sans-serif">${escapeXml(manufacturer)}</text>
-
-    <g filter="url(#softShadow)">
-      <rect x="560" y="342" width="528" height="142" rx="30" fill="${p.card}" stroke="${p.border}" />
-      <rect x="584" y="366" width="250" height="94" rx="24" fill="rgba(16,185,129,0.14)" stroke="rgba(16,185,129,0.26)" />
-      <text x="708" y="426" text-anchor="middle" font-size="${bestPriceSize}" font-weight="800" fill="${p.green}" font-family="Rubik, sans-serif">₪${escapeXml(bestPriceText)}</text>
-      ${hasDiscount ? `<text x="708" y="453" text-anchor="middle" font-size="21" font-weight="700" fill="${p.faint}" text-decoration="line-through" font-family="Rubik, sans-serif">₪${escapeXml(compactNumber(bestOffer?.price ?? null))}</text>` : ''}
-      <rect x="858" y="366" width="202" height="94" rx="24" fill="${theme === 'light' ? '#ffffff' : 'rgba(255,255,255,0.06)'}" stroke="${p.border}" />
-      <clipPath id="bestProductLogo"><rect x="884" y="376" width="74" height="74" rx="20" /></clipPath>
-      ${bestOffer?.logoDataUri ? `<image href="${bestOffer.logoDataUri}" x="884" y="376" width="74" height="74" preserveAspectRatio="xMidYMid slice" clip-path="url(#bestProductLogo)" />` : `<rect x="884" y="376" width="74" height="74" rx="20" fill="rgba(99,102,241,0.18)" />`}
-      <text x="1040" y="406" text-anchor="end" font-size="19" font-weight="800" fill="${p.text}" font-family="Rubik, sans-serif">${escapeXml(truncate(bestOffer?.chainName || copy.bestDeals, 14))}</text>
-      <text x="1040" y="434" text-anchor="end" font-size="15" font-weight="600" fill="${p.muted}" font-family="Rubik, sans-serif">${escapeXml(truncate(city || copy.livePrices, 18))}</text>
-    </g>
-    ${comparisonDots}
-    <rect x="824" y="574" width="264" height="34" rx="17" fill="rgba(99,102,241,0.14)" />
-    <text x="956" y="596" text-anchor="middle" font-size="14" font-weight="800" fill="${p.brand}" font-family="Rubik, sans-serif">${escapeXml(copy.openCta)}</text>
+    ${offerCards}
+    <rect x="818" y="536" width="270" height="32" rx="16" fill="rgba(99,102,241,0.14)" />
+    <text x="953" y="557" text-anchor="middle" font-size="14" font-weight="800" fill="${p.brand}" font-family="Rubik, sans-serif">${escapeXml(city || copy.openCta)}</text>
   `;
 
   return renderSocialSvg(socialFrame({ theme, lang, fontCss, logoDataUri, body }));
@@ -1296,39 +1283,37 @@ export async function generatePromoShareImage(
   const p = socialPalette(theme);
   const copy = getSocialCopy(lang);
   const { fontCss, logoDataUri } = await socialDefs(theme);
-  const titleLines = splitLinesStrict(promo.itemName, 22, 2);
-  const titleSize = fitFontSize(titleLines[0] || promo.itemName, 18, 44, 32);
+  const titleLines = splitLinesStrict(promo.itemName, 24, 2);
+  const titleSize = fitFontSize(titleLines[0] || promo.itemName, 18, 46, 32);
   const pct = formatPercent(promo.discountPercent);
   const promoSignal = lang === 'he' ? 'מבצע' : lang === 'fr' ? 'PROMO' : 'DEAL';
   const priceText = compactNumber(promo.effectivePrice);
-  const promoPriceSize = priceFontSize(promo.effectivePrice, 64, 44);
+  const promoPriceSize = priceFontSize(promo.effectivePrice, 58, 40);
   const oldPriceText = promo.price !== null ? compactNumber(promo.price) : '';
-  const location = truncate(`${promo.storeName}${promo.city ? ` · ${promo.city}` : ''}`, 24);
+  const location = truncate(`${promo.storeName || promo.chainName}${promo.city ? ` · ${promo.city}` : ''}`, 26);
+  const promoCardY = titleLines.length > 1 ? 312 : 300;
 
   const body = `
     <g filter="url(#softShadow)">
-      <rect x="72" y="150" width="430" height="382" rx="36" fill="${p.card}" stroke="${p.border}" />
-      <rect x="104" y="188" width="366" height="278" rx="30" fill="#ffffff" stroke="${p.border}" />
-      ${promo.imageDataUri ? `<image href="${promo.imageDataUri}" x="126" y="210" width="322" height="234" preserveAspectRatio="xMidYMid meet" />` : `<text x="287" y="360" text-anchor="middle" font-size="112" font-weight="800" fill="url(#brandGradient)" font-family="Rubik, sans-serif">A</text>`}
-      <rect x="104" y="484" width="366" height="28" rx="14" fill="rgba(239,68,68,0.13)" />
-      <text x="287" y="504" text-anchor="middle" font-size="14" font-weight="800" fill="${p.red}" font-family="Rubik, sans-serif">${escapeXml(copy.promoEyebrow)}</text>
-      ${pct ? `<rect x="92" y="130" width="132" height="72" rx="30" fill="${p.amber}" /><text x="158" y="177" text-anchor="middle" font-size="34" font-weight="900" fill="#241400" font-family="Rubik, sans-serif">${escapeXml(pct)}</text>` : ''}
+      <rect x="62" y="126" width="512" height="438" rx="40" fill="${p.card}" stroke="${p.border}" />
+      <rect x="92" y="160" width="452" height="360" rx="34" fill="#ffffff" stroke="${p.border}" />
+      ${promo.imageDataUri ? `<image href="${promo.imageDataUri}" x="112" y="178" width="412" height="322" preserveAspectRatio="xMidYMid meet" />` : `<text x="318" y="382" text-anchor="middle" font-size="128" font-weight="800" fill="url(#brandGradient)" font-family="Rubik, sans-serif">A</text>`}
+      ${pct ? `<rect x="88" y="238" width="140" height="76" rx="31" fill="${p.amber}" /><text x="158" y="287" text-anchor="middle" font-size="36" font-weight="900" fill="#241400" font-family="Rubik, sans-serif">${escapeXml(pct)}</text>` : ''}
     </g>
-    <rect x="760" y="128" width="328" height="52" rx="26" fill="rgba(239,68,68,0.16)" stroke="rgba(239,68,68,0.34)" />
-    <text x="924" y="162" text-anchor="middle" font-size="24" font-weight="900" fill="${p.red}" font-family="Rubik, sans-serif">${escapeXml(promoSignal)}</text>
-    <text x="1088" y="226" text-anchor="end" font-size="${titleSize}" font-weight="800" fill="${p.text}" font-family="Rubik, sans-serif">${escapeXml(titleLines[0] || '')}</text>
-    ${titleLines[1] ? `<text x="1088" y="${226 + titleSize + 6}" text-anchor="end" font-size="${titleSize}" font-weight="800" fill="${p.text}" font-family="Rubik, sans-serif">${escapeXml(titleLines[1])}</text>` : ''}
-    <text x="1088" y="${titleLines[1] ? 226 + titleSize * 2 + 34 : 226 + titleSize + 34}" text-anchor="end" font-size="20" font-weight="600" fill="${p.muted}" font-family="Rubik, sans-serif">${escapeXml(truncate(promo.manufacturerName || promo.chainName, 30))}</text>
+    <rect x="742" y="148" width="246" height="50" rx="25" fill="rgba(239,68,68,0.16)" stroke="rgba(239,68,68,0.34)" />
+    <text x="865" y="181" text-anchor="middle" font-size="25" font-weight="900" fill="${p.red}" font-family="Rubik, sans-serif">${escapeXml(promoSignal)}</text>
+    <text x="1088" y="236" text-anchor="end" font-size="${titleSize}" font-weight="850" fill="${p.text}" font-family="Rubik, sans-serif">${escapeXml(titleLines[0] || '')}</text>
+    ${titleLines[1] ? `<text x="1088" y="${236 + titleSize + 6}" text-anchor="end" font-size="${titleSize}" font-weight="850" fill="${p.text}" font-family="Rubik, sans-serif">${escapeXml(titleLines[1])}</text>` : ''}
     <g filter="url(#softShadow)">
-      <rect x="560" y="354" width="528" height="176" rx="34" fill="${p.card}" stroke="${p.border}" />
-      <rect x="584" y="380" width="278" height="124" rx="28" fill="rgba(16,185,129,0.14)" stroke="rgba(16,185,129,0.28)" />
-      <text x="723" y="454" text-anchor="middle" font-size="${promoPriceSize}" font-weight="800" fill="${p.green}" font-family="Rubik, sans-serif">₪${escapeXml(priceText)}</text>
-      ${oldPriceText ? `<text x="723" y="488" text-anchor="middle" font-size="24" font-weight="700" fill="${p.faint}" text-decoration="line-through" font-family="Rubik, sans-serif">₪${escapeXml(oldPriceText)}</text>` : ''}
-      <rect x="892" y="378" width="168" height="126" rx="28" fill="${theme === 'light' ? '#ffffff' : 'rgba(255,255,255,0.06)'}" stroke="${p.border}" />
-      <clipPath id="promoLogo"><rect x="936" y="392" width="80" height="80" rx="22" /></clipPath>
-      ${promo.logoDataUri ? `<image href="${promo.logoDataUri}" x="936" y="392" width="80" height="80" preserveAspectRatio="xMidYMid slice" clip-path="url(#promoLogo)" />` : `<rect x="936" y="392" width="80" height="80" rx="22" fill="rgba(99,102,241,0.16)" />`}
-      <text x="976" y="494" text-anchor="middle" font-size="17" font-weight="800" fill="${p.text}" font-family="Rubik, sans-serif">${escapeXml(truncate(promo.chainName, 14))}</text>
-      <text x="976" y="516" text-anchor="middle" font-size="12" font-weight="600" fill="${p.muted}" font-family="Rubik, sans-serif">${escapeXml(location)}</text>
+      <rect x="600" y="${promoCardY}" width="488" height="142" rx="32" fill="${p.card}" stroke="${p.border}" />
+      <rect x="626" y="${promoCardY + 25}" width="224" height="92" rx="26" fill="rgba(16,185,129,0.14)" stroke="rgba(16,185,129,0.28)" />
+      <text x="738" y="${promoCardY + 84}" text-anchor="middle" font-size="${promoPriceSize}" font-weight="900" fill="${p.green}" font-family="Rubik, sans-serif">₪${escapeXml(priceText)}</text>
+      ${oldPriceText ? `<text x="738" y="${promoCardY + 110}" text-anchor="middle" font-size="20" font-weight="700" fill="${p.faint}" text-decoration="line-through" font-family="Rubik, sans-serif">₪${escapeXml(oldPriceText)}</text>` : ''}
+      <clipPath id="promoLogo"><rect x="878" y="${promoCardY + 33}" width="78" height="78" rx="21" /></clipPath>
+      <rect x="878" y="${promoCardY + 33}" width="78" height="78" rx="21" fill="#ffffff" stroke="${p.border}" />
+      ${promo.logoDataUri ? `<image href="${promo.logoDataUri}" x="878" y="${promoCardY + 33}" width="78" height="78" preserveAspectRatio="xMidYMid slice" clip-path="url(#promoLogo)" />` : ''}
+      <text x="1062" y="${promoCardY + 65}" text-anchor="end" font-size="20" font-weight="900" fill="${p.text}" font-family="Rubik, sans-serif">${escapeXml(truncate(promo.chainName, 15))}</text>
+      <text x="1062" y="${promoCardY + 96}" text-anchor="end" font-size="15" font-weight="700" fill="${p.muted}" font-family="Rubik, sans-serif">${escapeXml(location)}</text>
     </g>
     <rect x="824" y="574" width="264" height="34" rx="17" fill="rgba(99,102,241,0.14)" />
     <text x="956" y="596" text-anchor="middle" font-size="14" font-weight="800" fill="${p.brand}" font-family="Rubik, sans-serif">${escapeXml(copy.openCta)}</text>
@@ -1347,30 +1332,34 @@ export async function generatePromotionsShareImage(
   const copy = getSocialCopy(lang);
   const { fontCss, logoDataUri } = await socialDefs(theme);
   const meta = await getPromotionsShareMeta(prisma, input);
-  const titleLines = splitLines(meta.title || copy.bestDeals, 26, 2);
+  const titleLines = splitLines(meta.title || copy.bestDeals, 24, 2);
+  const visiblePromotions = meta.promotions.filter((promo) => promo.imageDataUri).slice(0, 4);
+  const mainLogo = meta.promotions[0]?.logoDataUri || null;
+  const promoWord = lang === 'he' ? 'מבצעים' : lang === 'fr' ? 'PROMOTIONS' : 'DEALS';
 
-  const cards = meta.promotions.slice(0, 5).map((promo, index) => {
-    const x = 92 + index * 206;
-    const y = index % 2 === 0 ? 326 : 354;
+  const cards = visiblePromotions.map((promo, index) => {
+    const x = 84 + index * 258;
+    const y = 360;
     const pct = formatPercent(promo.discountPercent);
     return `<g filter="url(#softShadow)">
-      <rect x="${x}" y="${y}" width="178" height="180" rx="26" fill="${p.card}" stroke="${p.border}" />
-      <rect x="${x + 18}" y="${y + 16}" width="142" height="92" rx="20" fill="#ffffff" />
-      ${promo.imageDataUri ? `<image href="${promo.imageDataUri}" x="${x + 28}" y="${y + 22}" width="122" height="80" preserveAspectRatio="xMidYMid meet" />` : `<text x="${x + 89}" y="${y + 80}" text-anchor="middle" font-size="46" font-weight="900" fill="url(#brandGradient)" font-family="Rubik, sans-serif">A</text>`}
-      ${pct ? `<rect x="${x + 18}" y="${y + 18}" width="62" height="26" rx="13" fill="${p.amber}" /><text x="${x + 49}" y="${y + 37}" text-anchor="middle" font-size="15" font-weight="900" fill="#241400" font-family="Rubik, sans-serif">${escapeXml(pct)}</text>` : ''}
-      <text x="${x + 160}" y="${y + 134}" text-anchor="end" font-size="14" font-weight="900" fill="${p.text}" font-family="Rubik, sans-serif">${escapeXml(truncate(promo.itemName, 17))}</text>
-      <text x="${x + 160}" y="${y + 162}" text-anchor="end" font-size="30" font-weight="900" fill="${p.green}" font-family="Rubik, sans-serif">₪${escapeXml(compactNumber(promo.effectivePrice))}</text>
+      <rect x="${x}" y="${y}" width="226" height="166" rx="28" fill="${p.card}" stroke="${p.border}" />
+      <rect x="${x + 18}" y="${y + 16}" width="190" height="88" rx="22" fill="#ffffff" />
+      <image href="${promo.imageDataUri}" x="${x + 34}" y="${y + 22}" width="158" height="76" preserveAspectRatio="xMidYMid meet" />
+      ${pct ? `<rect x="${x + 18}" y="${y + 18}" width="66" height="28" rx="14" fill="${p.amber}" /><text x="${x + 51}" y="${y + 38}" text-anchor="middle" font-size="15" font-weight="900" fill="#241400" font-family="Rubik, sans-serif">${escapeXml(pct)}</text>` : ''}
+      <text x="${x + 204}" y="${y + 130}" text-anchor="end" font-size="15" font-weight="900" fill="${p.text}" font-family="Rubik, sans-serif">${escapeXml(truncate(promo.itemName, 19))}</text>
+      <text x="${x + 204}" y="${y + 156}" text-anchor="end" font-size="28" font-weight="900" fill="${p.green}" font-family="Rubik, sans-serif">₪${escapeXml(compactNumber(promo.effectivePrice))}</text>
     </g>`;
   }).join('');
 
   const body = `
-    <text x="1088" y="166" text-anchor="end" font-size="18" font-weight="800" fill="${p.brand}" font-family="Rubik, sans-serif">${escapeXml(copy.promosEyebrow)}</text>
-    <text x="1088" y="222" text-anchor="end" font-size="54" font-weight="900" fill="${p.text}" font-family="Rubik, sans-serif">${escapeXml(titleLines[0] || '')}</text>
-    ${titleLines[1] ? `<text x="1088" y="280" text-anchor="end" font-size="54" font-weight="900" fill="${p.text}" font-family="Rubik, sans-serif">${escapeXml(titleLines[1])}</text>` : ''}
-    <text x="1088" y="${titleLines[1] ? 318 : 280}" text-anchor="end" font-size="23" font-weight="700" fill="${p.muted}" font-family="Rubik, sans-serif">${escapeXml(copy.livePrices)}</text>
-    <rect x="88" y="186" width="408" height="98" rx="28" fill="${p.card}" stroke="${p.border}" filter="url(#softShadow)" />
-    <text x="292" y="226" text-anchor="middle" font-size="18" font-weight="800" fill="${p.muted}" font-family="Rubik, sans-serif">${escapeXml(copy.bestDeals)}</text>
-    <text x="292" y="264" text-anchor="middle" font-size="38" font-weight="900" fill="url(#brandGradient)" font-family="Rubik, sans-serif">${meta.promotions.length || 0} ${escapeXml(copy.items)}</text>
+    <g>
+      <clipPath id="promotionsMainLogo"><rect x="944" y="160" width="112" height="82" rx="22" /></clipPath>
+      <rect x="944" y="160" width="112" height="82" rx="22" fill="#ffffff" stroke="${p.border}" />
+      ${mainLogo ? `<image href="${mainLogo}" x="944" y="160" width="112" height="82" preserveAspectRatio="xMidYMid slice" clip-path="url(#promotionsMainLogo)" />` : `<text x="1000" y="214" text-anchor="middle" font-size="44" font-weight="900" fill="url(#brandGradient)" font-family="Rubik, sans-serif">A</text>`}
+      <text x="928" y="196" text-anchor="end" font-size="42" font-weight="900" fill="${p.text}" font-family="Rubik, sans-serif">${escapeXml(titleLines[0] || '')}</text>
+      ${titleLines[1] ? `<text x="928" y="242" text-anchor="end" font-size="42" font-weight="900" fill="${p.text}" font-family="Rubik, sans-serif">${escapeXml(titleLines[1])}</text>` : ''}
+    </g>
+    <text x="1088" y="318" text-anchor="end" font-size="82" font-weight="950" fill="${p.red}" font-family="Rubik, sans-serif">${escapeXml(promoWord)}</text>
     ${cards}
     <rect x="818" y="552" width="270" height="32" rx="16" fill="rgba(99,102,241,0.14)" />
     <text x="953" y="573" text-anchor="middle" font-size="14" font-weight="800" fill="${p.brand}" font-family="Rubik, sans-serif">${escapeXml(copy.openCta)}</text>
@@ -1389,10 +1378,13 @@ export async function generateSiteShareImage(theme: ShareTheme, lang: ShareLang)
     chainLogoDataUri('יש חסד'),
   ]);
   const body = `
-    <text x="1088" y="182" text-anchor="end" font-size="86" font-weight="900" fill="url(#brandGradient)" font-family="Rubik, sans-serif">${escapeXml(copy.siteTitle)}</text>
+    <g>
+      ${logoDataUri ? `<image href="${logoDataUri}" x="950" y="104" width="128" height="128" preserveAspectRatio="xMidYMid meet" />` : `<rect x="970" y="124" width="92" height="92" rx="24" fill="url(#brandGradient)" />`}
+      <text x="932" y="186" text-anchor="end" font-size="92" font-weight="900" fill="url(#brandGradient)" font-family="Rubik, sans-serif">Agali</text>
+    </g>
     ${svgTextLines(splitLines(copy.siteSubtitle, 34, 2), {
       x: 1088,
-      y: 244,
+      y: 260,
       lineHeight: 34,
       size: 26,
       weight: 700,
@@ -1426,5 +1418,5 @@ export async function generateSiteShareImage(theme: ShareTheme, lang: ShareLang)
     </g>
   `;
 
-  return renderSocialSvg(socialFrame({ theme, lang, fontCss, logoDataUri, body }));
+  return renderSocialSvg(socialFrame({ theme, lang, fontCss, logoDataUri, body, showHeader: false }));
 }

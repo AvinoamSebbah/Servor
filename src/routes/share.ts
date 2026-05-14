@@ -56,6 +56,18 @@ function buildProductImageParams(city: string, theme: string, lang: string): URL
   return params;
 }
 
+function buildFrontendStateParams(input: {
+  city?: string;
+  theme: string;
+  lang: string;
+}): URLSearchParams {
+  const params = new URLSearchParams();
+  if (input.city) params.set('city', input.city);
+  params.set('theme', input.theme);
+  params.set('lang', input.lang);
+  return params;
+}
+
 function buildPromoImageParams(input: {
   city: string;
   chainId: string;
@@ -79,7 +91,8 @@ async function sendProductSharePage(req: Request, res: Response, barcode: string
   const theme = parseShortTheme(req.query.theme ?? req.query.t);
   const lang = parseShortLang(req.query.lang ?? req.query.l);
   const FRONTEND_URL = process.env.FRONTEND_URL || 'https://agali.live';
-  const redirectTarget = `${FRONTEND_URL}/product/${encodeURIComponent(barcode)}`;
+  const redirectParams = buildFrontendStateParams({ city, theme, lang });
+  const redirectTarget = `${FRONTEND_URL}/product/${encodeURIComponent(barcode)}?${redirectParams.toString()}`;
 
   try {
     const meta = await getProductShareMeta(prisma, barcode, city);
@@ -140,14 +153,8 @@ async function sendPromoSharePage(req: Request, res: Response, itemCode: string)
   const city = shortString(req.query.city) || shortString(req.query.c);
   const FRONTEND_URL = process.env.FRONTEND_URL || 'https://agali.live';
 
-  const frontendParams = new URLSearchParams();
-  if (city) frontendParams.set('city', city);
-  if (chainId) frontendParams.set('chainId', chainId);
-  if (chainName) frontendParams.set('chainName', chainName);
-  if (storeId) frontendParams.set('storeId', storeId);
-  frontendParams.set('promoItem', itemCode);
-  if (promotionId) frontendParams.set('promotionId', promotionId);
-  const redirectTarget = `${FRONTEND_URL}/promotions?${frontendParams.toString()}`;
+  const frontendParams = buildFrontendStateParams({ city, theme, lang });
+  const redirectTarget = `${FRONTEND_URL}/product/${encodeURIComponent(itemCode)}?${frontendParams.toString()}`;
 
   try {
     const meta = chainId ? await getPromoShareMeta(prisma, { itemCode, chainId, storeId, promotionId, city }) : null;
@@ -239,7 +246,8 @@ router.get('/site', async (req: Request, res: Response) => {
   const imageUrl = `${backendBaseUrl}/share/site/image?theme=${encodeURIComponent(theme)}&lang=${encodeURIComponent(lang)}`;
   const title = esc('Agali • Comparateur de prix et promotions');
   const description = esc('Compare les prix, trouve les meilleures promotions et partage tes listes de courses.');
-  const safeRedirect = esc(FRONTEND_URL);
+  const frontendParams = buildFrontendStateParams({ theme, lang });
+  const safeRedirect = esc(`${FRONTEND_URL}?${frontendParams.toString()}`);
   const safeImage = esc(imageUrl);
 
   res.setHeader('Content-Type', 'text/html; charset=utf-8');
@@ -336,6 +344,8 @@ router.get('/promotions', async (req: Request, res: Response) => {
   if (chainId) frontendParams.set('chainId', chainId);
   if (chainName) frontendParams.set('chainName', chainName);
   if (storeId) frontendParams.set('storeId', storeId);
+  frontendParams.set('theme', theme);
+  frontendParams.set('lang', lang);
   const redirectTarget = `${FRONTEND_URL}/promotions${frontendParams.toString() ? `?${frontendParams.toString()}` : ''}`;
 
   try {
@@ -419,8 +429,12 @@ router.get('/:code/image', async (req: Request, res: Response) => {
 // GET /share/:code — returns an HTML page with OG meta tags then redirects to the frontend
 router.get('/:code', async (req: Request, res: Response) => {
   const { code } = req.params;
+  const theme = parseShareTheme(req.query.theme);
+  const lang = parseShareLang(req.query.lang);
+  const city = typeof req.query.city === 'string' ? req.query.city.trim() : '';
   const FRONTEND_URL = process.env.FRONTEND_URL || 'https://agali.live';
-  const redirectTarget = `${FRONTEND_URL}/shopping-list/run/${code.toUpperCase()}`;
+  const redirectParams = buildFrontendStateParams({ city, theme, lang });
+  const redirectTarget = `${FRONTEND_URL}/shopping-list/run/${code.toUpperCase()}?${redirectParams.toString()}`;
 
   try {
     const rows = await prisma.$queryRawUnsafe<{ name: string; items: unknown }[]>(
@@ -438,7 +452,7 @@ router.get('/:code', async (req: Request, res: Response) => {
     const itemsArr: Array<{ productId?: string }> = Array.isArray(rawItems) ? rawItems : [];
     const count = itemsArr.length;
     const backendBaseUrl = getBackendBaseUrl(req);
-    const ogImage = `${backendBaseUrl}/share/${encodeURIComponent(code.toUpperCase())}/image?theme=dark&lang=he`;
+    const ogImage = `${backendBaseUrl}/share/${encodeURIComponent(code.toUpperCase())}/image?theme=${encodeURIComponent(theme)}&lang=${encodeURIComponent(lang)}`;
     const title = esc(`🛒 ${name}`);
     const description = esc(
       count > 0
