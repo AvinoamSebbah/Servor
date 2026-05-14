@@ -215,6 +215,46 @@ function splitLines(value: string, maxCharsPerLine: number, maxLines: number): s
   return lines.slice(0, maxLines);
 }
 
+function splitLinesStrict(value: string, maxCharsPerLine: number, maxLines: number): string[] {
+  const words = value.trim().split(/\s+/).filter(Boolean);
+  if (words.length === 0) return [''];
+  const lines: string[] = [];
+  let current = '';
+
+  for (const word of words) {
+    const safeWord = word.length > maxCharsPerLine ? truncate(word, maxCharsPerLine) : word;
+    const candidate = current ? `${current} ${safeWord}` : safeWord;
+    if (candidate.length <= maxCharsPerLine) {
+      current = candidate;
+      continue;
+    }
+    if (current) lines.push(current);
+    current = safeWord;
+    if (lines.length === maxLines - 1) break;
+  }
+
+  if (lines.length < maxLines && current) lines.push(current);
+  const original = words.join(' ');
+  const rendered = lines.join(' ');
+  if (original.length > rendered.length && lines.length > 0) {
+    lines[lines.length - 1] = truncate(lines[lines.length - 1], maxCharsPerLine);
+  }
+  return lines.slice(0, maxLines);
+}
+
+function fitFontSize(text: string, maxChars: number, maxSize: number, minSize: number): number {
+  const length = Math.max(1, text.trim().length);
+  if (length <= maxChars) return maxSize;
+  return Math.max(minSize, Math.floor(maxSize * (maxChars / length)));
+}
+
+function priceFontSize(value: number | null, maxSize: number, minSize: number): number {
+  const text = compactNumber(value);
+  if (text.length <= 4) return maxSize;
+  if (text.length <= 6) return Math.max(minSize, maxSize - 8);
+  return minSize;
+}
+
 function splitLinesNoEllipsis(value: string, maxCharsPerLine: number, maxLines: number): string[] {
   const words = value.trim().split(/\s+/).filter(Boolean);
   if (words.length === 0) return [''];
@@ -334,7 +374,7 @@ async function fetchText(url: string): Promise<string | null> {
 
 async function buildEmbeddedFontCss(): Promise<string> {
   const weights = [400, 500, 600, 700, 800, 900];
-  const subsets = ['hebrew', 'latin-ext', 'latin'];
+  const subsets = ['hebrew', 'latin'];
   const declarations: string[] = [];
 
   for (const weight of weights) {
@@ -343,9 +383,9 @@ async function buildEmbeddedFontCss(): Promise<string> {
         process.cwd(),
         'node_modules',
         '@fontsource',
-        'rubik',
+        'heebo',
         'files',
-        `rubik-${subset}-${weight}-normal.woff`
+        `heebo-${subset}-${weight}-normal.woff`
       );
       const dataUri = await readFileDataUri(filePath, 'font/woff');
       if (!dataUri) continue;
@@ -363,7 +403,7 @@ async function buildEmbeddedFontCss(): Promise<string> {
 
   if (declarations.length > 0) return declarations.join('\n');
 
-  const cssUrl = 'https://fonts.googleapis.com/css2?family=Rubik:wght@400;500;600;700;800;900&display=swap';
+  const cssUrl = 'https://fonts.googleapis.com/css2?family=Heebo:wght@400;500;600;700;800;900&display=swap';
   const googleCss = await fetchText(cssUrl);
   if (!googleCss) return '';
   const urlMatches = [...googleCss.matchAll(/url\((https:[^)]+)\)/g)].map((match) => match[1]);
@@ -1114,57 +1154,63 @@ export async function generateProductShareImage(
 ): Promise<Buffer> {
   const p = socialPalette(theme);
   const copy = getSocialCopy(lang);
-  const isRtl = lang === 'he';
   const [{ fontCss, logoDataUri }, meta, mainImageDataUri] = await Promise.all([
     socialDefs(theme),
     getProductShareMeta(prisma, barcode, city),
     productImageDataUri(barcode),
   ]);
-  const titleLines = splitLines(meta.itemName, isRtl ? 28 : 32, 2);
-  const manufacturer = truncate(meta.manufacturerName || copy.productEyebrow, 34);
+  const titleLines = splitLinesStrict(meta.itemName, 24, 2);
+  const titleSize = fitFontSize(titleLines[0] || meta.itemName, 18, 46, 34);
+  const manufacturer = truncate(meta.manufacturerName || copy.productEyebrow, 30);
   const topOffers = meta.offers.slice(0, 4);
-  const heroX = 72;
-  const heroWidth = 492;
-  const rightX = 590;
-  const rightEdge = 1088;
-  const textX = isRtl ? rightEdge : rightX;
-  const textAnchor = isRtl ? 'end' : 'start';
+  const bestOffer = topOffers[0] ?? null;
+  const bestPrice = bestOffer ? (bestOffer.effectivePrice ?? bestOffer.promoPrice ?? bestOffer.price) : null;
+  const bestPriceText = compactNumber(bestPrice);
+  const bestPriceSize = priceFontSize(bestPrice, 62, 44);
+  const hasDiscount = Boolean(bestOffer?.price != null && bestOffer?.effectivePrice != null && bestOffer.effectivePrice < bestOffer.price);
+  const productCard = { x: 72, y: 158, w: 430, h: 374 };
+  const textX = 1088;
+  const titleY = titleLines.length > 1 ? 220 : 250;
 
-  const offerCards = topOffers.map((offer, index) => {
-    const x = rightX + (index % 2) * 252;
-    const y = 346 + Math.floor(index / 2) * 116;
-    const hasDiscount = offer.price !== null && offer.effectivePrice !== null && offer.effectivePrice < offer.price;
+  const comparisonDots = topOffers.slice(1, 4).map((offer, index) => {
     const price = offer.effectivePrice ?? offer.promoPrice ?? offer.price;
-    const logo = offer.logoDataUri
-      ? `<image href="${offer.logoDataUri}" x="${x + 18}" y="${y + 20}" width="62" height="62" preserveAspectRatio="xMidYMid slice" clip-path="url(#offerLogo${index})" />`
-      : `<rect x="${x + 18}" y="${y + 20}" width="62" height="62" rx="16" fill="rgba(99,102,241,0.16)" />`;
-    return `<g filter="url(#softShadow)">
-      <clipPath id="offerLogo${index}"><rect x="${x + 18}" y="${y + 20}" width="62" height="62" rx="16" /></clipPath>
-      <rect x="${x}" y="${y}" width="232" height="98" rx="22" fill="${p.card}" stroke="${p.border}" />
-      ${logo}
-      <text x="${x + 94}" y="${y + 38}" font-size="17" font-weight="800" fill="${p.text}" font-family="Rubik, sans-serif">${escapeXml(truncate(offer.chainName, 12))}</text>
-      <text x="${x + 94}" y="${y + 76}" font-size="38" font-weight="900" fill="${hasDiscount ? p.green : p.brand}" font-family="Rubik, sans-serif">₪${escapeXml(compactNumber(price))}</text>
-      ${hasDiscount ? `<text x="${x + 178}" y="${y + 52}" font-size="17" font-weight="700" fill="${p.faint}" text-decoration="line-through" font-family="Rubik, sans-serif">₪${escapeXml(compactNumber(offer.price))}</text>` : ''}
+    const x = 562 + index * 168;
+    return `<g>
+      <rect x="${x}" y="506" width="146" height="54" rx="18" fill="${theme === 'light' ? '#ffffff' : 'rgba(255,255,255,0.06)'}" stroke="${p.border}" />
+      <clipPath id="miniOfferLogo${index}"><rect x="${x + 10}" y="514" width="38" height="38" rx="12" /></clipPath>
+      ${offer.logoDataUri ? `<image href="${offer.logoDataUri}" x="${x + 10}" y="514" width="38" height="38" preserveAspectRatio="xMidYMid slice" clip-path="url(#miniOfferLogo${index})" />` : `<rect x="${x + 10}" y="514" width="38" height="38" rx="12" fill="rgba(99,102,241,0.18)" />`}
+      <text x="${x + 134}" y="536" text-anchor="end" font-size="14" font-weight="700" fill="${p.muted}" font-family="Rubik, sans-serif">${escapeXml(truncate(offer.chainName, 10))}</text>
+      <text x="${x + 134}" y="555" text-anchor="end" font-size="17" font-weight="900" fill="${p.green}" font-family="Rubik, sans-serif">₪${escapeXml(compactNumber(price))}</text>
     </g>`;
   }).join('');
 
   const body = `
     <g filter="url(#softShadow)">
-      <rect x="${heroX}" y="158" width="${heroWidth}" height="392" rx="34" fill="${p.card}" stroke="${p.border}" />
-      <rect x="${heroX + 26}" y="184" width="${heroWidth - 52}" height="340" rx="26" fill="#ffffff" stroke="${p.border}" />
+      <rect x="${productCard.x}" y="${productCard.y}" width="${productCard.w}" height="${productCard.h}" rx="36" fill="${p.card}" stroke="${p.border}" />
+      <rect x="${productCard.x + 28}" y="${productCard.y + 28}" width="${productCard.w - 56}" height="${productCard.h - 56}" rx="28" fill="#ffffff" stroke="${p.border}" />
       ${mainImageDataUri
-        ? `<image href="${mainImageDataUri}" x="${heroX + 46}" y="202" width="${heroWidth - 92}" height="304" preserveAspectRatio="xMidYMid meet" />`
-        : `<text x="${heroX + heroWidth / 2}" y="378" text-anchor="middle" font-size="116" font-weight="900" fill="url(#brandGradient)" font-family="Rubik, sans-serif">A</text>`}
+        ? `<image href="${mainImageDataUri}" x="${productCard.x + 54}" y="${productCard.y + 58}" width="${productCard.w - 108}" height="${productCard.h - 116}" preserveAspectRatio="xMidYMid meet" />`
+        : `<text x="${productCard.x + productCard.w / 2}" y="376" text-anchor="middle" font-size="112" font-weight="800" fill="url(#brandGradient)" font-family="Rubik, sans-serif">A</text>`}
     </g>
-    <text x="${textX}" y="182" text-anchor="${textAnchor}" font-size="18" font-weight="800" fill="${p.brand}" font-family="Rubik, sans-serif">${escapeXml(copy.productEyebrow)}</text>
-    <text x="${textX}" y="232" text-anchor="${textAnchor}" font-size="48" font-weight="900" fill="${p.text}" font-family="Rubik, sans-serif">${escapeXml(titleLines[0] || '')}</text>
-    ${titleLines[1] ? `<text x="${textX}" y="286" text-anchor="${textAnchor}" font-size="48" font-weight="900" fill="${p.text}" font-family="Rubik, sans-serif">${escapeXml(titleLines[1])}</text>` : ''}
-    <text x="${textX}" y="${titleLines[1] ? 326 : 286}" text-anchor="${textAnchor}" font-size="22" font-weight="700" fill="${p.muted}" font-family="Rubik, sans-serif">${escapeXml(manufacturer)}</text>
-    <rect x="${rightX}" y="304" width="${rightEdge - rightX}" height="1" fill="${p.border}" />
-    <text x="${rightX}" y="330" font-size="16" font-weight="800" fill="${p.muted}" font-family="Rubik, sans-serif">${escapeXml(`${copy.bestDeals}${city ? ` · ${city}` : ''}`)}</text>
-    ${offerCards}
-    <rect x="824" y="568" width="264" height="32" rx="16" fill="rgba(99,102,241,0.14)" />
-    <text x="956" y="589" text-anchor="middle" font-size="14" font-weight="800" fill="${p.brand}" font-family="Rubik, sans-serif">${escapeXml(copy.openCta)}</text>
+    <text x="${textX}" y="174" text-anchor="end" font-size="17" font-weight="700" fill="${p.brand}" font-family="Rubik, sans-serif">${escapeXml(copy.productEyebrow)}</text>
+    <text x="${textX}" y="${titleY}" text-anchor="end" font-size="${titleSize}" font-weight="800" fill="${p.text}" font-family="Rubik, sans-serif">${escapeXml(titleLines[0] || '')}</text>
+    ${titleLines[1] ? `<text x="${textX}" y="${titleY + titleSize + 4}" text-anchor="end" font-size="${titleSize}" font-weight="800" fill="${p.text}" font-family="Rubik, sans-serif">${escapeXml(titleLines[1])}</text>` : ''}
+    <text x="${textX}" y="${titleY + (titleLines.length > 1 ? titleSize * 2 + 28 : titleSize + 28)}" text-anchor="end" font-size="21" font-weight="600" fill="${p.muted}" font-family="Rubik, sans-serif">${escapeXml(manufacturer)}</text>
+
+    <g filter="url(#softShadow)">
+      <rect x="560" y="342" width="528" height="142" rx="30" fill="${p.card}" stroke="${p.border}" />
+      <rect x="584" y="366" width="250" height="94" rx="24" fill="rgba(16,185,129,0.14)" stroke="rgba(16,185,129,0.26)" />
+      <text x="708" y="426" text-anchor="middle" font-size="${bestPriceSize}" font-weight="800" fill="${p.green}" font-family="Rubik, sans-serif">₪${escapeXml(bestPriceText)}</text>
+      ${hasDiscount ? `<text x="708" y="453" text-anchor="middle" font-size="21" font-weight="700" fill="${p.faint}" text-decoration="line-through" font-family="Rubik, sans-serif">₪${escapeXml(compactNumber(bestOffer?.price ?? null))}</text>` : ''}
+      <rect x="858" y="366" width="202" height="94" rx="24" fill="${theme === 'light' ? '#ffffff' : 'rgba(255,255,255,0.06)'}" stroke="${p.border}" />
+      <clipPath id="bestProductLogo"><rect x="884" y="376" width="74" height="74" rx="20" /></clipPath>
+      ${bestOffer?.logoDataUri ? `<image href="${bestOffer.logoDataUri}" x="884" y="376" width="74" height="74" preserveAspectRatio="xMidYMid slice" clip-path="url(#bestProductLogo)" />` : `<rect x="884" y="376" width="74" height="74" rx="20" fill="rgba(99,102,241,0.18)" />`}
+      <text x="1040" y="406" text-anchor="end" font-size="19" font-weight="800" fill="${p.text}" font-family="Rubik, sans-serif">${escapeXml(truncate(bestOffer?.chainName || copy.bestDeals, 14))}</text>
+      <text x="1040" y="434" text-anchor="end" font-size="15" font-weight="600" fill="${p.muted}" font-family="Rubik, sans-serif">${escapeXml(truncate(city || copy.livePrices, 18))}</text>
+    </g>
+    ${comparisonDots}
+    <rect x="824" y="574" width="264" height="34" rx="17" fill="rgba(99,102,241,0.14)" />
+    <text x="956" y="596" text-anchor="middle" font-size="14" font-weight="800" fill="${p.brand}" font-family="Rubik, sans-serif">${escapeXml(copy.openCta)}</text>
   `;
 
   return renderSocialSvg(socialFrame({ theme, lang, fontCss, logoDataUri, body }));
@@ -1250,40 +1296,42 @@ export async function generatePromoShareImage(
   const p = socialPalette(theme);
   const copy = getSocialCopy(lang);
   const { fontCss, logoDataUri } = await socialDefs(theme);
-  const titleLines = splitLines(promo.itemName, 28, 2);
+  const titleLines = splitLinesStrict(promo.itemName, 22, 2);
+  const titleSize = fitFontSize(titleLines[0] || promo.itemName, 18, 44, 32);
   const pct = formatPercent(promo.discountPercent);
   const promoSignal = lang === 'he' ? 'מבצע' : lang === 'fr' ? 'PROMO' : 'DEAL';
+  const priceText = compactNumber(promo.effectivePrice);
+  const promoPriceSize = priceFontSize(promo.effectivePrice, 64, 44);
+  const oldPriceText = promo.price !== null ? compactNumber(promo.price) : '';
+  const location = truncate(`${promo.storeName}${promo.city ? ` · ${promo.city}` : ''}`, 24);
 
   const body = `
-    <rect x="724" y="126" width="364" height="54" rx="27" fill="rgba(239,68,68,0.16)" stroke="rgba(239,68,68,0.34)" />
-    <text x="906" y="162" text-anchor="middle" font-size="26" font-weight="900" fill="${p.red}" font-family="Rubik, sans-serif">${escapeXml(promoSignal)}</text>
     <g filter="url(#softShadow)">
-      <rect x="74" y="152" width="430" height="376" rx="34" fill="${p.card}" stroke="${p.border}" />
-      <rect x="104" y="188" width="370" height="246" rx="28" fill="#ffffff" stroke="${p.border}" />
-      ${promo.imageDataUri ? `<image href="${promo.imageDataUri}" x="130" y="208" width="318" height="206" preserveAspectRatio="xMidYMid meet" />` : `<text x="289" y="344" text-anchor="middle" font-size="116" font-weight="900" fill="url(#brandGradient)" font-family="Rubik, sans-serif">A</text>`}
-      <rect x="104" y="452" width="370" height="56" rx="22" fill="rgba(239,68,68,0.14)" stroke="rgba(239,68,68,0.30)" />
-      <text x="290" y="489" text-anchor="middle" font-size="24" font-weight="900" fill="${p.red}" font-family="Rubik, sans-serif">${escapeXml(copy.promoEyebrow)}</text>
-      ${pct ? `<circle cx="126" cy="188" r="58" fill="${p.amber}" /><text x="126" y="198" text-anchor="middle" font-size="32" font-weight="900" fill="#241400" font-family="Rubik, sans-serif">${escapeXml(pct)}</text>` : ''}
+      <rect x="72" y="150" width="430" height="382" rx="36" fill="${p.card}" stroke="${p.border}" />
+      <rect x="104" y="188" width="366" height="278" rx="30" fill="#ffffff" stroke="${p.border}" />
+      ${promo.imageDataUri ? `<image href="${promo.imageDataUri}" x="126" y="210" width="322" height="234" preserveAspectRatio="xMidYMid meet" />` : `<text x="287" y="360" text-anchor="middle" font-size="112" font-weight="800" fill="url(#brandGradient)" font-family="Rubik, sans-serif">A</text>`}
+      <rect x="104" y="484" width="366" height="28" rx="14" fill="rgba(239,68,68,0.13)" />
+      <text x="287" y="504" text-anchor="middle" font-size="14" font-weight="800" fill="${p.red}" font-family="Rubik, sans-serif">${escapeXml(copy.promoEyebrow)}</text>
+      ${pct ? `<rect x="92" y="130" width="132" height="72" rx="30" fill="${p.amber}" /><text x="158" y="177" text-anchor="middle" font-size="34" font-weight="900" fill="#241400" font-family="Rubik, sans-serif">${escapeXml(pct)}</text>` : ''}
     </g>
-    <text x="1088" y="202" text-anchor="end" font-size="18" font-weight="800" fill="${p.red}" font-family="Rubik, sans-serif">${escapeXml(copy.promoEyebrow)}</text>
-    <text x="1088" y="252" text-anchor="end" font-size="48" font-weight="900" fill="${p.text}" font-family="Rubik, sans-serif">${escapeXml(titleLines[0] || '')}</text>
-    ${titleLines[1] ? `<text x="1088" y="304" text-anchor="end" font-size="48" font-weight="900" fill="${p.text}" font-family="Rubik, sans-serif">${escapeXml(titleLines[1])}</text>` : ''}
-    <text x="1088" y="${titleLines[1] ? 340 : 304}" text-anchor="end" font-size="22" font-weight="700" fill="${p.muted}" font-family="Rubik, sans-serif">${escapeXml(promo.manufacturerName || promo.chainName)}</text>
-
+    <rect x="760" y="128" width="328" height="52" rx="26" fill="rgba(239,68,68,0.16)" stroke="rgba(239,68,68,0.34)" />
+    <text x="924" y="162" text-anchor="middle" font-size="24" font-weight="900" fill="${p.red}" font-family="Rubik, sans-serif">${escapeXml(promoSignal)}</text>
+    <text x="1088" y="226" text-anchor="end" font-size="${titleSize}" font-weight="800" fill="${p.text}" font-family="Rubik, sans-serif">${escapeXml(titleLines[0] || '')}</text>
+    ${titleLines[1] ? `<text x="1088" y="${226 + titleSize + 6}" text-anchor="end" font-size="${titleSize}" font-weight="800" fill="${p.text}" font-family="Rubik, sans-serif">${escapeXml(titleLines[1])}</text>` : ''}
+    <text x="1088" y="${titleLines[1] ? 226 + titleSize * 2 + 34 : 226 + titleSize + 34}" text-anchor="end" font-size="20" font-weight="600" fill="${p.muted}" font-family="Rubik, sans-serif">${escapeXml(truncate(promo.manufacturerName || promo.chainName, 30))}</text>
     <g filter="url(#softShadow)">
-      <rect x="586" y="374" width="502" height="154" rx="30" fill="${p.card}" stroke="${p.border}" />
-      <rect x="606" y="394" width="220" height="114" rx="24" fill="rgba(16,185,129,0.12)" stroke="rgba(16,185,129,0.28)" />
-      <rect x="852" y="394" width="216" height="114" rx="24" fill="${theme === 'light' ? '#f7f8ff' : 'rgba(255,255,255,0.055)'}" stroke="${p.border}" />
-      <rect x="916" y="398" width="88" height="88" rx="22" fill="#ffffff" stroke="${p.border}" />
-      <clipPath id="promoLogo"><rect x="916" y="398" width="88" height="88" rx="22" /></clipPath>
-      ${promo.logoDataUri ? `<image href="${promo.logoDataUri}" x="916" y="398" width="88" height="88" preserveAspectRatio="xMidYMid slice" clip-path="url(#promoLogo)" />` : `<rect x="916" y="398" width="88" height="88" rx="22" fill="rgba(99,102,241,0.16)" />`}
-      <text x="960" y="506" text-anchor="middle" font-size="18" font-weight="900" fill="${p.text}" font-family="Rubik, sans-serif">${escapeXml(truncate(promo.chainName, 18))}</text>
-      <text x="960" y="523" text-anchor="middle" font-size="11" font-weight="700" fill="${p.muted}" font-family="Rubik, sans-serif">${escapeXml(truncate(`${promo.storeName}${promo.city ? ` · ${promo.city}` : ''}`, 24))}</text>
-      <text x="626" y="462" font-size="66" font-weight="900" fill="${p.green}" font-family="Rubik, sans-serif">₪${escapeXml(compactNumber(promo.effectivePrice))}</text>
-      ${promo.price !== null ? `<text x="632" y="494" font-size="26" font-weight="800" fill="${p.faint}" text-decoration="line-through" font-family="Rubik, sans-serif">₪${escapeXml(compactNumber(promo.price))}</text>` : ''}
+      <rect x="560" y="354" width="528" height="176" rx="34" fill="${p.card}" stroke="${p.border}" />
+      <rect x="584" y="380" width="278" height="124" rx="28" fill="rgba(16,185,129,0.14)" stroke="rgba(16,185,129,0.28)" />
+      <text x="723" y="454" text-anchor="middle" font-size="${promoPriceSize}" font-weight="800" fill="${p.green}" font-family="Rubik, sans-serif">₪${escapeXml(priceText)}</text>
+      ${oldPriceText ? `<text x="723" y="488" text-anchor="middle" font-size="24" font-weight="700" fill="${p.faint}" text-decoration="line-through" font-family="Rubik, sans-serif">₪${escapeXml(oldPriceText)}</text>` : ''}
+      <rect x="892" y="378" width="168" height="126" rx="28" fill="${theme === 'light' ? '#ffffff' : 'rgba(255,255,255,0.06)'}" stroke="${p.border}" />
+      <clipPath id="promoLogo"><rect x="936" y="392" width="80" height="80" rx="22" /></clipPath>
+      ${promo.logoDataUri ? `<image href="${promo.logoDataUri}" x="936" y="392" width="80" height="80" preserveAspectRatio="xMidYMid slice" clip-path="url(#promoLogo)" />` : `<rect x="936" y="392" width="80" height="80" rx="22" fill="rgba(99,102,241,0.16)" />`}
+      <text x="976" y="494" text-anchor="middle" font-size="17" font-weight="800" fill="${p.text}" font-family="Rubik, sans-serif">${escapeXml(truncate(promo.chainName, 14))}</text>
+      <text x="976" y="516" text-anchor="middle" font-size="12" font-weight="600" fill="${p.muted}" font-family="Rubik, sans-serif">${escapeXml(location)}</text>
     </g>
-    <rect x="818" y="552" width="270" height="32" rx="16" fill="rgba(99,102,241,0.14)" />
-    <text x="953" y="573" text-anchor="middle" font-size="14" font-weight="800" fill="${p.brand}" font-family="Rubik, sans-serif">${escapeXml(copy.openCta)}</text>
+    <rect x="824" y="574" width="264" height="34" rx="17" fill="rgba(99,102,241,0.14)" />
+    <text x="956" y="596" text-anchor="middle" font-size="14" font-weight="800" fill="${p.brand}" font-family="Rubik, sans-serif">${escapeXml(copy.openCta)}</text>
   `;
 
   return renderSocialSvg(socialFrame({ theme, lang, fontCss, logoDataUri, body }));
