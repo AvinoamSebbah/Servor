@@ -4,7 +4,8 @@ FROM node:20-bookworm-slim AS base
 WORKDIR /app
 ENV PNPM_HOME="/pnpm"
 ENV PATH="$PNPM_HOME:$PATH"
-RUN corepack enable
+ARG PNPM_VERSION=10.33.4
+RUN corepack enable && corepack prepare pnpm@${PNPM_VERSION} --activate
 RUN apt-get update \
 	&& apt-get install -y --no-install-recommends openssl ca-certificates fontconfig fonts-dejavu-core fonts-noto-core \
 	&& rm -rf /var/lib/apt/lists/*
