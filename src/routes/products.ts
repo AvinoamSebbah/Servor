@@ -1154,6 +1154,159 @@ router.get('/search/stream', async (req, res) => {
   return res.status(404).json({ error: 'Not found' });
 });
 
+// Lightweight product picker search for cart/list flows.
+// Intentionally returns only the fields those UIs need, so `/search`
+// can keep its richer response without paying that cost here.
+router.get('/search-lite', async (req, res) => {
+  try {
+    const query = typeof req.query.q === 'string' ? req.query.q.trim() : '';
+    const limitRaw = Number.parseInt(String(req.query.limit ?? '12'), 10);
+    const offsetRaw = Number.parseInt(String(req.query.offset ?? '0'), 10);
+    const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? Math.min(limitRaw, 30) : 12;
+    const offset = Number.isFinite(offsetRaw) && offsetRaw >= 0 ? offsetRaw : 0;
+
+    if (!query) return res.status(400).json({ error: 'q is required' });
+
+    type LiteRow = {
+      product_id: number;
+      item_code: string;
+      item_name: string | null;
+      manufacturer_name: string | null;
+      rank: number | null;
+      chain_count: number | null;
+    };
+
+    const fetchLimit = limit + 1;
+    let rows: LiteRow[];
+
+    if (query.length === 1) {
+      rows = await prisma.$queryRaw<LiteRow[]>(Prisma.sql`
+        SELECT
+          p.id AS product_id,
+          p.item_code,
+          p.item_name,
+          p.manufacturer_name,
+          0::real AS rank,
+          COALESCE(pss.chain_count, 0)::integer AS chain_count
+        FROM products p
+        LEFT JOIN product_search_stats pss ON pss.product_id = p.id
+        WHERE lower(COALESCE(p.item_name, '')) LIKE lower(${query}) || '%'
+           OR lower(COALESCE(p.manufacturer_name, '')) LIKE lower(${query}) || '%'
+        ORDER BY chain_count DESC NULLS LAST, p.item_name ASC NULLS LAST, p.item_code ASC
+        LIMIT ${fetchLimit}::integer
+        OFFSET ${offset}::integer
+      `);
+    } else {
+      rows = await prisma.$queryRaw<LiteRow[]>(Prisma.sql`
+        WITH params AS (
+          SELECT
+            ${query}::text AS raw_query,
+            websearch_to_tsquery('simple', ${query}::text) AS tsq
+        ),
+        fts_candidates AS MATERIALIZED (
+          SELECT
+            p.id AS product_id,
+            p.item_code,
+            p.item_name,
+            p.manufacturer_name,
+            (
+              ts_rank(p.search_idx_col, params.tsq)
+              + CASE
+                  WHEN lower(COALESCE(p.item_name, '')) = lower(params.raw_query) THEN 10
+                  WHEN lower(COALESCE(p.item_name, '')) LIKE lower(params.raw_query) || '%' THEN 6
+                  WHEN lower(COALESCE(p.item_name, '')) LIKE '% ' || lower(params.raw_query) || '%' THEN 3
+                  ELSE 0
+                END
+            )::real AS text_rank
+          FROM products p
+          CROSS JOIN params
+          WHERE p.search_idx_col @@ params.tsq
+          ORDER BY text_rank DESC NULLS LAST, p.item_code ASC
+          LIMIT 300
+        )
+        SELECT
+          c.product_id,
+          c.item_code,
+          c.item_name,
+          c.manufacturer_name,
+          c.text_rank AS rank,
+          COALESCE(pss.chain_count, 0)::integer AS chain_count
+        FROM fts_candidates c
+        LEFT JOIN product_search_stats pss ON pss.product_id = c.product_id
+        ORDER BY chain_count DESC NULLS LAST, rank DESC NULLS LAST, item_code ASC
+        LIMIT ${fetchLimit}::integer
+        OFFSET ${offset}::integer
+      `);
+
+      if (rows.length < fetchLimit) {
+        const existingProductIds = rows.map((row) => row.product_id);
+        const fallbackRows = await prisma.$queryRaw<LiteRow[]>(Prisma.sql`
+          WITH params AS (
+            SELECT
+              ${query}::text AS raw_query,
+              regexp_replace(${query}::text, '\s+', '', 'g') AS compact_query
+          ),
+          ranked_candidates AS (
+            SELECT DISTINCT ON (p.id)
+              p.id,
+              p.item_code,
+              p.item_name,
+              p.manufacturer_name,
+              GREATEST(
+                similarity(COALESCE(p.item_name, ''), params.raw_query),
+                similarity(COALESCE(p.manufacturer_name, ''), params.raw_query),
+                similarity(regexp_replace(COALESCE(p.item_name, ''), '\s+', '', 'g'), params.compact_query),
+                word_similarity(params.raw_query, COALESCE(p.item_name, ''))
+              ) AS base_similarity
+            FROM products p
+            CROSS JOIN params
+            WHERE (
+              p.item_name % params.raw_query
+              OR p.manufacturer_name % params.raw_query
+            )
+            ${existingProductIds.length > 0
+              ? Prisma.sql`AND p.id <> ALL(${existingProductIds}::int[])`
+              : Prisma.empty}
+            ORDER BY p.id, base_similarity DESC NULLS LAST
+          )
+          SELECT
+            c.id AS product_id,
+            c.item_code,
+            c.item_name,
+            c.manufacturer_name,
+            c.base_similarity::real AS rank,
+            COALESCE(pss.chain_count, 0)::integer AS chain_count
+          FROM ranked_candidates c
+          LEFT JOIN product_search_stats pss ON pss.product_id = c.id
+          ORDER BY chain_count DESC NULLS LAST, rank DESC NULLS LAST, item_code ASC
+          LIMIT ${Math.max(0, fetchLimit - rows.length)}::integer
+        `);
+        rows = [...rows, ...fallbackRows];
+      }
+    }
+
+    const pageRows = rows.slice(0, limit);
+    const hasMore = rows.length > limit;
+
+    return res.json({
+      products: pageRows.map((row) => ({
+        itemCode: row.item_code,
+        itemName: row.item_name,
+        imageUrl: getProductDeliveryUrl(row.item_code),
+      })),
+      pagination: {
+        limit,
+        offset,
+        nextOffset: hasMore ? offset + limit : null,
+        hasMore,
+      },
+    });
+  } catch (error) {
+    console.error('[products.search-lite] error', error);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 // ─── GET /api/products/search ────────────────────────────────────────────────
 // router.get('/search', async (req, res) => {
 //   try {
