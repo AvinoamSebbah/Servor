@@ -127,6 +127,9 @@ router.get('/search', async (req, res) => {
     if (!query) {
       return res.status(400).json({ error: 'q is required' });
     }
+    if (query.length > 200) {
+      return res.status(400).json({ error: 'Query too long (max 200 characters)' });
+    }
 
     const searchCacheKey = `search|${query.toLowerCase()}|${city.toLowerCase()}|${chainId}|${storeId}|${includeDetails}|${detailsLimit}|${limit}|${offset}`;
     if (!includeDetails) {
@@ -700,7 +703,7 @@ router.get('/search', async (req, res) => {
     } else {
       console.error('products.search unknown error:', error);
     }
-    return res.status(500).json({ error: 'Internal server error', detail: String(error) });
+    return res.status(500).json({ error: 'Internal server error' });
   }
 });
 
@@ -763,6 +766,9 @@ router.get('/search/fast', async (req, res) => {
 
     if (!q || typeof q !== 'string') {
       return res.status(400).json({ error: 'Query parameter required' });
+    }
+    if (q.length > 200) {
+      return res.status(400).json({ error: 'Query too long (max 200 characters)' });
     }
 
     const pageNum = Math.max(parsePositiveInt(page, 1), 1);
@@ -1062,7 +1068,7 @@ router.get('/search/fast', async (req, res) => {
     return res.json(payload);
   } catch (error) {
     console.error('Fast search error:', error);
-    return res.status(500).json({ error: 'Internal server error', detail: String(error) });
+    return res.status(500).json({ error: 'Internal server error' });
   }
 });
 
@@ -1145,7 +1151,7 @@ router.get('/search/details', async (req, res) => {
     return res.json({ details });
   } catch (error) {
     console.error('Search details error:', error);
-    return res.status(500).json({ error: 'Internal server error', detail: String(error) });
+    return res.status(500).json({ error: 'Internal server error' });
   }
 });
 
@@ -1166,6 +1172,7 @@ router.get('/search-lite', async (req, res) => {
     const offset = Number.isFinite(offsetRaw) && offsetRaw >= 0 ? offsetRaw : 0;
 
     if (!query) return res.status(400).json({ error: 'q is required' });
+    if (query.length > 200) return res.status(400).json({ error: 'Query too long (max 200 characters)' });
 
     type LiteRow = {
       product_id: number;
@@ -1705,6 +1712,10 @@ router.get('/:barcode', async (req, res) => {
   const timingsMs: Record<string, number> = {};
   try {
     const { barcode } = req.params;
+    // Validate barcode format (EAN-8 to EAN-14)
+    if (!/^\d{8,14}$/.test(barcode)) {
+      return res.status(400).json({ error: 'Invalid barcode format' });
+    }
     const { city } = req.query;
     const cityText = typeof city === 'string' ? city.trim() : '';
 
@@ -1801,7 +1812,7 @@ router.get('/:barcode', async (req, res) => {
     });
   } catch (error) {
     console.error('Product detail error:', error);
-    return res.status(500).json({ error: 'Internal server error', detail: String(error) });
+    return res.status(500).json({ error: 'Internal server error' });
   }
 });
 

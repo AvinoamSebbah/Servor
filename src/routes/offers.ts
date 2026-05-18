@@ -232,6 +232,7 @@ function setCachedStores(key: string, data: StoreFilterRow[]): void {
 
 // ── Shared result cache for promotions — TTL 5 min, shared across all users ──
 const PROMOTIONS_RESULT_CACHE_TTL_MS = 15 * 60 * 1000; // 15 min — one full query serves all pages
+const PROMOTIONS_RESULT_CACHE_MAX = 100; // LRU cap to prevent unbounded memory growth
 type PromotionsResultCacheEntry = {
   all: TopPromotionDto[];
   sourceExhausted: boolean;
@@ -243,6 +244,11 @@ function getCachedPromoResult(key: string): PromotionsResultCacheEntry | null {
   return e && e.expiresAt > Date.now() ? e : null;
 }
 function setCachedPromoResult(key: string, all: TopPromotionDto[], sourceExhausted: boolean): void {
+  if (promotionsResultCache.size >= PROMOTIONS_RESULT_CACHE_MAX) {
+    // Evict oldest entry (first key)
+    const firstKey = promotionsResultCache.keys().next().value;
+    if (firstKey !== undefined) promotionsResultCache.delete(firstKey);
+  }
   promotionsResultCache.set(key, { all, sourceExhausted, expiresAt: Date.now() + PROMOTIONS_RESULT_CACHE_TTL_MS });
 }
 

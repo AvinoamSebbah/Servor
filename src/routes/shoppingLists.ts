@@ -1,9 +1,19 @@
 import { Router, Request, Response } from 'express';
 import { PrismaClient } from '@prisma/client';
+import { randomInt } from 'crypto';
+import rateLimit from 'express-rate-limit';
 import type { ServerResponse } from 'http';
 
 const router = Router();
 const prisma = new PrismaClient();
+
+const listsMutateLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many updates, please try again later.' },
+});
 
 // ─── In-memory SSE pub/sub ─────────────────────────────────────────────────
 // Map: code → Set of active SSE response streams
@@ -30,12 +40,14 @@ function broadcast(code: string, payload: object) {
   }
 }
 
-// ─── Code generator: 5 chars alphanum sans ambiguïtés (sans O/0/I/1) ──────
+// ─── Code generator: 20 chars alphanum sans ambiguïtés (sans O/0/I/1) ──────
+// crypto.randomInt → cryptographically secure, 32^20 ≈ 10^30 combinations
 const ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+const CODE_LENGTH = 20;
 function generateCode(): string {
   let code = '';
-  for (let i = 0; i < 5; i++) {
-    code += ALPHABET[Math.floor(Math.random() * ALPHABET.length)];
+  for (let i = 0; i < CODE_LENGTH; i++) {
+    code += ALPHABET[randomInt(0, ALPHABET.length)];
   }
   return code;
 }
@@ -59,6 +71,10 @@ router.post('/', async (req: Request, res: Response) => {
     if (!Array.isArray(items)) {
       return res.status(400).json({ error: 'items must be an array' });
     }
+    if (items.length > 200) {
+      return res.status(400).json({ error: 'Too many items (max 200)' });
+    }
+    const safeName = typeof name === 'string' ? name.slice(0, 100) : 'רשימת קניות';
 
     const code = await generateUniqueCode();
 
@@ -73,7 +89,7 @@ router.post('/', async (req: Request, res: Response) => {
        VALUES ($1, $2, $3::jsonb)
        RETURNING id, code, name, items, updated_at`,
       code,
-      name,
+      safeName,
       JSON.stringify(items)
     );
 
@@ -87,8 +103,8 @@ router.post('/', async (req: Request, res: Response) => {
 // ─── GET /api/lists/:code — lire une liste ─────────────────────────────────
 router.get('/:code', async (req: Request, res: Response) => {
   try {
-    const { code } = req.params;
-    if (!code || code.length !== 5) {
+    const code = String(req.params.code);
+    if (!code || code.length !== 20) {
       return res.status(400).json({ error: 'קוד לא תקין' });
     }
 
@@ -111,12 +127,12 @@ router.get('/:code', async (req: Request, res: Response) => {
 });
 
 // ─── PATCH /api/lists/:code — mettre à jour items + broadcast ─────────────
-router.patch('/:code', async (req: Request, res: Response) => {
+router.patch('/:code', listsMutateLimiter, async (req: Request, res: Response) => {
   try {
-    const { code } = req.params;
+    const code = String(req.params.code);
     const { items, name } = req.body;
 
-    if (!code || code.length !== 5) {
+    if (!code || code.length !== 20) {
       return res.status(400).json({ error: 'קוד לא תקין' });
     }
 
@@ -125,13 +141,16 @@ router.patch('/:code', async (req: Request, res: Response) => {
     let idx = 1;
 
     if (Array.isArray(items)) {
+      if (items.length > 200) {
+        return res.status(400).json({ error: 'Too many items (max 200)' });
+      }
       setClauses.push(`items = $${idx}::jsonb`);
       values.push(JSON.stringify(items));
       idx++;
     }
     if (name && typeof name === 'string') {
       setClauses.push(`name = $${idx}`);
-      values.push(name);
+      values.push(name.slice(0, 100));
       idx++;
     }
 
@@ -163,8 +182,8 @@ router.patch('/:code', async (req: Request, res: Response) => {
 
 // ─── GET /api/lists/:code/stream — SSE live updates ───────────────────────
 router.get('/:code/stream', (req: Request, res: Response) => {
-  const { code } = req.params;
-  if (!code || code.length !== 5) {
+  const code = String(req.params.code);
+  if (!code || code.length !== 20) {
     res.status(400).end();
     return;
   }

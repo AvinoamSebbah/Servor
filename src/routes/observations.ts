@@ -4,6 +4,11 @@ import { PrismaClient } from '@prisma/client';
 const router = Router();
 const prisma = new PrismaClient();
 
+// Barcode must be 8-14 digits
+const ITEM_CODE_RE = /^\d{8,14}$/;
+// City name: explicit whitelist (same set as auth.ts)
+const ISRAEL_CITIES = new Set(['ירושלים', 'תל אביב', 'חיפה', 'ראשון לציון', 'פתח תקווה', 'אשדוד', 'נתניה', 'באר שבע', 'בני ברק', 'חולון', 'רמת גן', 'רמת השרון', 'כפר סבא', 'מודיעין', 'הרצליה', 'רעננה', 'לוד', 'רמלה', 'הוד השרון', 'עכו']);;
+
 // ── Auth helper (same pattern as auth.ts) ─────────────────────────────────────
 
 async function getUserByToken(token: string) {
@@ -19,6 +24,8 @@ async function getUserByToken(token: string) {
 }
 
 function extractToken(req: Request): string | null {
+  const cookieToken = req.cookies?.['auth_token'];
+  if (cookieToken && typeof cookieToken === 'string') return cookieToken.trim() || null;
   const header = req.headers.authorization;
   if (!header?.startsWith('Bearer ')) return null;
   return header.slice(7).trim() || null;
@@ -57,13 +64,19 @@ router.get('/', async (req: Request, res: Response) => {
 
 router.get('/:itemCode/status', async (req: Request, res: Response) => {
   const token = extractToken(req);
-  if (!token) return res.json({ active: false, status: null, min_discount_pct: null });
+  if (!token) return res.status(401).json({ error: 'Unauthorized' });
 
   const user = await getUserByToken(token);
-  if (!user) return res.json({ active: false, status: null, min_discount_pct: null });
+  if (!user) return res.status(401).json({ error: 'Invalid or expired session' });
 
-  const { itemCode } = req.params;
+  const itemCode = String(req.params.itemCode);
+  if (!ITEM_CODE_RE.test(itemCode)) {
+    return res.status(400).json({ error: 'Invalid item code format' });
+  }
   const city = (req.query.city as string) || '';
+  if (city && !ISRAEL_CITIES.has(city)) {
+    return res.status(400).json({ error: 'Invalid city' });
+  }
 
   try {
     const rows = await prisma.$queryRawUnsafe<any[]>(
@@ -104,8 +117,14 @@ router.post('/', async (req: Request, res: Response) => {
   if (!item_code || typeof item_code !== 'string') {
     return res.status(400).json({ error: 'item_code is required' });
   }
+  if (!ITEM_CODE_RE.test(item_code)) {
+    return res.status(400).json({ error: 'Invalid item code format' });
+  }
   if (!city || typeof city !== 'string') {
     return res.status(400).json({ error: 'city is required' });
+  }
+  if (!ISRAEL_CITIES.has(city)) {
+    return res.status(400).json({ error: 'Invalid city format' });
   }
   const pct = parseFloat(min_discount_pct);
   if (!Number.isFinite(pct) || pct < 1 || pct > 100) {
@@ -165,14 +184,21 @@ router.patch('/:itemCode', async (req: Request, res: Response) => {
   const user = await getUserByToken(token);
   if (!user) return res.status(401).json({ error: 'Invalid or expired session' });
 
-  const { itemCode } = req.params;
+  const itemCode = String(req.params.itemCode);
   const { status, city } = req.body;
+
+  if (!ITEM_CODE_RE.test(itemCode)) {
+    return res.status(400).json({ error: 'Invalid item code format' });
+  }
 
   const VALID_STATUSES = ['active', 'paused', 'stopped'];
   if (!VALID_STATUSES.includes(status)) {
     return res.status(400).json({ error: `status must be one of: ${VALID_STATUSES.join(', ')}` });
   }
   if (!city) return res.status(400).json({ error: 'city is required' });
+  if (!ISRAEL_CITIES.has(city)) {
+    return res.status(400).json({ error: 'Invalid city format' });
+  }
 
   try {
     const result = await prisma.$executeRawUnsafe(
@@ -202,8 +228,15 @@ router.delete('/:itemCode', async (req: Request, res: Response) => {
   const user = await getUserByToken(token);
   if (!user) return res.status(401).json({ error: 'Invalid or expired session' });
 
-  const { itemCode } = req.params;
+  const itemCode = String(req.params.itemCode);
   const city = (req.query.city as string) || '';
+
+  if (!ITEM_CODE_RE.test(itemCode)) {
+    return res.status(400).json({ error: 'Invalid item code format' });
+  }
+  if (city && !ISRAEL_CITIES.has(city)) {
+    return res.status(400).json({ error: 'Invalid city format' });
+  }
 
   try {
     await prisma.$executeRawUnsafe(

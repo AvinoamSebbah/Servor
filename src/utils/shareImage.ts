@@ -334,7 +334,6 @@ async function fetchDataUri(url: string): Promise<string | null> {
     const response = await axios.get<ArrayBuffer>(url, {
       responseType: 'arraybuffer',
       timeout: 10000,
-      httpsAgent: new https.Agent({ rejectUnauthorized: false }),
       headers: {
         'User-Agent': 'Mozilla/5.0 AgaliSharePreview/1.0',
       },
@@ -358,7 +357,6 @@ async function fetchText(url: string): Promise<string | null> {
     const response = await axios.get<string>(url, {
       responseType: 'text',
       timeout: 10000,
-      httpsAgent: new https.Agent({ rejectUnauthorized: false }),
       headers: {
         'User-Agent': 'Mozilla/5.0 AgaliSharePreview/1.0',
       },

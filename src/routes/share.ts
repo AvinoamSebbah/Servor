@@ -1,4 +1,5 @@
 import { Router, Request, Response } from 'express';
+import { randomBytes } from 'crypto';
 import { PrismaClient } from '@prisma/client';
 import {
   generatePromoShareImage,
@@ -24,10 +25,13 @@ function esc(str: string): string {
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#x27;');
 }
 
 function getBackendBaseUrl(req: Request): string {
+  // Prefer explicit env var to avoid Host header injection
+  if (process.env.BACKEND_BASE_URL) return process.env.BACKEND_BASE_URL;
   const protocol = req.headers['x-forwarded-proto']?.toString().split(',')[0] || req.protocol;
   const host = req.headers['x-forwarded-host']?.toString().split(',')[0] || req.get('host') || 'localhost:3001';
   return `${protocol}://${host}`;
@@ -109,8 +113,10 @@ async function sendProductSharePage(req: Request, res: Response, barcode: string
     const safeRedirect = esc(redirectTarget);
     const safeImage = esc(imageUrl);
 
+    const nonce = randomBytes(16).toString('base64');
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
     res.setHeader('Cache-Control', 'public, max-age=60');
+    res.setHeader('Content-Security-Policy', `default-src 'none'; script-src 'nonce-${nonce}'; frame-ancestors 'none'`);
 
     return res.send(`<!DOCTYPE html>
 <html lang="${lang}" dir="${lang === 'he' ? 'rtl' : 'ltr'}">
@@ -133,7 +139,7 @@ async function sendProductSharePage(req: Request, res: Response, barcode: string
   <meta http-equiv="refresh" content="0;url=${safeRedirect}" />
 </head>
 <body>
-  <script>window.location.replace("${safeRedirect}");</script>
+  <script nonce="${nonce}">window.location.replace(${JSON.stringify(redirectTarget)});</script>
   <p>Redirecting...</p>
 </body>
 </html>`);
@@ -165,8 +171,10 @@ async function sendPromoSharePage(req: Request, res: Response, itemCode: string)
     const safeRedirect = esc(redirectTarget);
     const safeImage = esc(imageUrl);
 
+    const nonce = randomBytes(16).toString('base64');
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
     res.setHeader('Cache-Control', 'public, max-age=60');
+    res.setHeader('Content-Security-Policy', `default-src 'none'; script-src 'nonce-${nonce}'; frame-ancestors 'none'`);
     return res.send(`<!DOCTYPE html>
 <html lang="${lang}" dir="${lang === 'he' ? 'rtl' : 'ltr'}">
 <head>
@@ -188,7 +196,7 @@ async function sendPromoSharePage(req: Request, res: Response, itemCode: string)
   <meta http-equiv="refresh" content="0;url=${safeRedirect}" />
 </head>
 <body>
-  <script>window.location.replace("${safeRedirect}");</script>
+  <script nonce="${nonce}">window.location.replace(${JSON.stringify(redirectTarget)});</script>
   <p>Redirecting...</p>
 </body>
 </html>`);
@@ -199,7 +207,7 @@ async function sendPromoSharePage(req: Request, res: Response, itemCode: string)
 }
 
 router.get('/product/:barcode/image', async (req: Request, res: Response) => {
-  const { barcode } = req.params;
+  const barcode = String(req.params.barcode);
   const city = typeof req.query.city === 'string' ? req.query.city.trim() : '';
   const theme = parseShareTheme(req.query.theme);
   const lang = parseShareLang(req.query.lang);
@@ -216,11 +224,11 @@ router.get('/product/:barcode/image', async (req: Request, res: Response) => {
 });
 
 router.get('/p/:barcode', async (req: Request, res: Response) => {
-  return sendProductSharePage(req, res, req.params.barcode);
+  return sendProductSharePage(req, res, String(req.params.barcode));
 });
 
 router.get('/product/:barcode', async (req: Request, res: Response) => {
-  return sendProductSharePage(req, res, req.params.barcode);
+  return sendProductSharePage(req, res, String(req.params.barcode));
 });
 
 router.get('/site/image', async (req: Request, res: Response) => {
@@ -247,11 +255,14 @@ router.get('/site', async (req: Request, res: Response) => {
   const title = esc('Agali • Comparateur de prix et promotions');
   const description = esc('Compare les prix, trouve les meilleures promotions et partage tes listes de courses.');
   const frontendParams = buildFrontendStateParams({ theme, lang });
-  const safeRedirect = esc(`${FRONTEND_URL}?${frontendParams.toString()}`);
+  const rawRedirect = `${FRONTEND_URL}?${frontendParams.toString()}`;
+  const safeRedirect = esc(rawRedirect);
   const safeImage = esc(imageUrl);
 
+  const nonce = randomBytes(16).toString('base64');
   res.setHeader('Content-Type', 'text/html; charset=utf-8');
   res.setHeader('Cache-Control', 'public, max-age=3600');
+  res.setHeader('Content-Security-Policy', `default-src 'none'; script-src 'nonce-${nonce}'; frame-ancestors 'none'`);
   return res.send(`<!DOCTYPE html>
 <html lang="${lang}" dir="${lang === 'he' ? 'rtl' : 'ltr'}">
 <head>
@@ -273,14 +284,14 @@ router.get('/site', async (req: Request, res: Response) => {
   <meta http-equiv="refresh" content="0;url=${safeRedirect}" />
 </head>
 <body>
-  <script>window.location.replace("${safeRedirect}");</script>
+  <script nonce="${nonce}">window.location.replace(${JSON.stringify(rawRedirect)});</script>
   <p>Redirecting...</p>
 </body>
 </html>`);
 });
 
 router.get('/promo/:itemCode/image', async (req: Request, res: Response) => {
-  const { itemCode } = req.params;
+  const itemCode = String(req.params.itemCode);
   const theme = parseShareTheme(req.query.theme);
   const lang = parseShareLang(req.query.lang);
   const chainId = typeof req.query.chainId === 'string' ? req.query.chainId.trim() : '';
@@ -302,11 +313,11 @@ router.get('/promo/:itemCode/image', async (req: Request, res: Response) => {
 });
 
 router.get('/d/:itemCode', async (req: Request, res: Response) => {
-  return sendPromoSharePage(req, res, req.params.itemCode);
+  return sendPromoSharePage(req, res, String(req.params.itemCode));
 });
 
 router.get('/promo/:itemCode', async (req: Request, res: Response) => {
-  return sendPromoSharePage(req, res, req.params.itemCode);
+  return sendPromoSharePage(req, res, String(req.params.itemCode));
 });
 
 router.get('/promotions/image', async (req: Request, res: Response) => {
@@ -366,8 +377,10 @@ router.get('/promotions', async (req: Request, res: Response) => {
     const safeRedirect = esc(redirectTarget);
     const safeImage = esc(imageUrl);
 
+    const nonce = randomBytes(16).toString('base64');
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
     res.setHeader('Cache-Control', 'public, max-age=60');
+    res.setHeader('Content-Security-Policy', `default-src 'none'; script-src 'nonce-${nonce}'; frame-ancestors 'none'`);
     return res.send(`<!DOCTYPE html>
 <html lang="${lang}" dir="${lang === 'he' ? 'rtl' : 'ltr'}">
 <head>
@@ -389,7 +402,7 @@ router.get('/promotions', async (req: Request, res: Response) => {
   <meta http-equiv="refresh" content="0;url=${safeRedirect}" />
 </head>
 <body>
-  <script>window.location.replace("${safeRedirect}");</script>
+  <script nonce="${nonce}">window.location.replace(${JSON.stringify(redirectTarget)});</script>
   <p>Redirecting...</p>
 </body>
 </html>`);
@@ -400,7 +413,7 @@ router.get('/promotions', async (req: Request, res: Response) => {
 });
 
 router.get('/:code/image', async (req: Request, res: Response) => {
-  const { code } = req.params;
+  const code = String(req.params.code);
   const theme = parseShareTheme(req.query.theme);
   const lang = parseShareLang(req.query.lang);
 
@@ -428,7 +441,7 @@ router.get('/:code/image', async (req: Request, res: Response) => {
 
 // GET /share/:code — returns an HTML page with OG meta tags then redirects to the frontend
 router.get('/:code', async (req: Request, res: Response) => {
-  const { code } = req.params;
+  const code = String(req.params.code);
   const theme = parseShareTheme(req.query.theme);
   const lang = parseShareLang(req.query.lang);
   const city = typeof req.query.city === 'string' ? req.query.city.trim() : '';
@@ -462,9 +475,11 @@ router.get('/:code', async (req: Request, res: Response) => {
     const safeRedirect = esc(redirectTarget);
     const safeImage = esc(ogImage);
 
+    const nonce = randomBytes(16).toString('base64');
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
     // Cache for 60s so WhatsApp scraper gets fresh data
     res.setHeader('Cache-Control', 'public, max-age=60');
+    res.setHeader('Content-Security-Policy', `default-src 'none'; script-src 'nonce-${nonce}'; frame-ancestors 'none'`);
 
     return res.send(`<!DOCTYPE html>
 <html lang="he" dir="rtl">
@@ -487,7 +502,7 @@ router.get('/:code', async (req: Request, res: Response) => {
   <meta http-equiv="refresh" content="0;url=${safeRedirect}" />
 </head>
 <body>
-  <script>window.location.replace("${safeRedirect}");</script>
+  <script nonce="${nonce}">window.location.replace(${JSON.stringify(redirectTarget)});</script>
   <p>מעביר אותך לרשימה...</p>
 </body>
 </html>`);

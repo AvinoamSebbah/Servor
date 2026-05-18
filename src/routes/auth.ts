@@ -1,15 +1,65 @@
 import { Router, Request, Response } from 'express';
 import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
-import { PrismaClient } from '@prisma/client';
+import rateLimit from 'express-rate-limit';
+import { PrismaClient, Prisma } from '@prisma/client';
 
 const router = Router();
 const prisma = new PrismaClient();
 
+// ── Auth cookie helpers ─────────────────────────────────────────────────────
+const AUTH_COOKIE = 'auth_token';
+const isProduction = process.env.NODE_ENV === 'production';
+const COOKIE_DOMAIN = process.env.COOKIE_DOMAIN; // e.g. '.agali.live' in production
+
+/** Read auth token from httpOnly cookie first, then Authorization header (backwards compat) */
+function extractToken(req: Request): string | null {
+  const cookieToken = req.cookies?.[AUTH_COOKIE];
+  if (cookieToken && typeof cookieToken === 'string') return cookieToken.trim() || null;
+  const header = req.headers.authorization;
+  if (!header?.startsWith('Bearer ')) return null;
+  return header.slice(7).trim() || null;
+}
+
+function setAuthCookie(res: Response, token: string, ttlMs: number): void {
+  res.cookie(AUTH_COOKIE, token, {
+    httpOnly: true,
+    secure: isProduction,
+    sameSite: 'lax',
+    maxAge: ttlMs,
+    path: '/',
+    ...(COOKIE_DOMAIN ? { domain: COOKIE_DOMAIN } : {}),
+  });
+}
+
+function clearAuthCookie(res: Response): void {
+  res.clearCookie(AUTH_COOKIE, {
+    path: '/',
+    ...(COOKIE_DOMAIN ? { domain: COOKIE_DOMAIN } : {}),
+  });
+}
+
+// Strict rate limiter for authentication endpoints
+const authStrictLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many attempts, please try again later.' },
+});
+
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
 const SALT_ROUNDS = 12;
-const TOKEN_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
+const TOKEN_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
+
+// Whitelist of valid Israeli cities for city field validation
+const ISRAEL_CITIES = new Set([
+  'ירושלים', 'תל אביב', 'חיפה', 'ראשון לציון', 'פתח תקווה',
+  'אשדוד', 'נתניה', 'באר שבע', 'בני ברק', 'חולון',
+  'רמת גן', 'רמת השרון', 'כפר סבא', 'מודיעין', 'הרצליה',
+  'רעננה', 'לוד', 'רמלה', 'הוד השרון', 'עכו',
+]);
 
 function generateToken(): string {
   return crypto.randomBytes(48).toString('hex');
@@ -26,8 +76,15 @@ function sanitizeEmail(email: string): string {
   return email.trim().toLowerCase();
 }
 
+const EMAIL_RE = /^[^\s@]{1,64}@[^\s@]{1,253}$/;
+
+function isValidEmail(email: string): boolean {
+  return EMAIL_RE.test(email) && email.length <= 254;
+}
+
 function validatePassword(password: string): { valid: boolean; message?: string } {
   if (password.length < 8) return { valid: false, message: 'Password too short (min 8 chars)' };
+  if (password.length > 72) return { valid: false, message: 'Password too long (max 72 chars)' };
   if (!/[A-Z]/.test(password)) return { valid: false, message: 'Password must contain uppercase letter' };
   if (!/[0-9]/.test(password)) return { valid: false, message: 'Password must contain a digit' };
   return { valid: true };
@@ -69,12 +126,13 @@ function safeUser(user: any) {
   return safe;
 }
 
-// ── GET /api/auth/check-user?email=... ───────────────────────────────────────
+// ── POST /api/auth/check-user ────────────────────────────────────────────────────────
 // Returns { exists: true/false } — used by frontend to adapt UX (no PW strength bar for existing users)
+// Email is in request body to avoid logging in server access logs / proxies
 
-router.get('/check-user', async (req: Request, res: Response) => {
+router.post('/check-user', authStrictLimiter, async (req: Request, res: Response) => {
   try {
-    const raw = (req.query.email as string) || '';
+    const raw = (req.body?.email as string) || '';
     if (!raw) return res.json({ exists: false });
     const cleanEmail = sanitizeEmail(raw);
     const rows = await prisma.$queryRawUnsafe<any[]>(
@@ -89,7 +147,7 @@ router.get('/check-user', async (req: Request, res: Response) => {
 
 // ── POST /api/auth/signup ─────────────────────────────────────────────────────
 
-router.post('/signup', async (req: Request, res: Response) => {
+router.post('/signup', authStrictLimiter, async (req: Request, res: Response) => {
   try {
     const { email, password, name, age, plan } = req.body;
 
@@ -101,6 +159,10 @@ router.post('/signup', async (req: Request, res: Response) => {
     const cleanEmail = sanitizeEmail(email);
     const { valid, message } = validatePassword(password);
     if (!valid) return res.status(400).json({ error: message });
+
+    if (!isValidEmail(cleanEmail)) {
+      return res.status(400).json({ error: 'Invalid email format' });
+    }
 
     // Check existing user
     const existing = await prisma.$queryRawUnsafe<any[]>(
@@ -118,7 +180,7 @@ router.post('/signup', async (req: Request, res: Response) => {
     const userId = generateCuid();
     const cleanPlan = ['free', 'pro', 'max'].includes(plan) ? plan : 'free';
     const cleanAge = age ? Math.max(1, Math.min(120, parseInt(age, 10))) : null;
-    const displayName = name?.trim() || cleanEmail.split('@')[0];
+    const displayName = (name?.trim() || cleanEmail.split('@')[0]).slice(0, 50);
 
     await prisma.$executeRawUnsafe(
       `INSERT INTO users (id, email, password_hash, name, display_name, age, plan, created_at, updated_at)
@@ -138,9 +200,10 @@ router.post('/signup', async (req: Request, res: Response) => {
     const users = await prisma.$queryRawUnsafe<any[]>('SELECT * FROM users WHERE id = $1', userId);
     const user = users[0];
 
+    setAuthCookie(res, token, TOKEN_TTL_MS);
     return res.status(201).json({
       success: true,
-      token,
+      token, // also returned for backwards-compat clients
       user: safeUser(user),
     });
   } catch (error) {
@@ -151,7 +214,7 @@ router.post('/signup', async (req: Request, res: Response) => {
 
 // ── POST /api/auth/signin ─────────────────────────────────────────────────────
 
-router.post('/signin', async (req: Request, res: Response) => {
+router.post('/signin', authStrictLimiter, async (req: Request, res: Response) => {
   try {
     const { email, password } = req.body;
 
@@ -190,9 +253,10 @@ router.post('/signin', async (req: Request, res: Response) => {
       user.id
     );
 
+    setAuthCookie(res, token, TOKEN_TTL_MS);
     return res.json({
       success: true,
-      token,
+      token, // also returned for backwards-compat clients
       user: safeUser(user),
     });
   } catch (error) {
@@ -205,13 +269,13 @@ router.post('/signin', async (req: Request, res: Response) => {
 
 router.post('/signout', async (req: Request, res: Response) => {
   try {
-    const authHeader = req.headers.authorization;
-    const token = authHeader?.replace('Bearer ', '').trim();
+    const token = extractToken(req);
 
     if (token) {
       await prisma.$executeRawUnsafe('DELETE FROM auth_tokens WHERE token = $1', token);
     }
 
+    clearAuthCookie(res);
     // Also destroy express session if any
     req.session?.destroy?.(() => {});
 
@@ -226,8 +290,7 @@ router.post('/signout', async (req: Request, res: Response) => {
 
 router.get('/session', async (req: Request, res: Response) => {
   try {
-    const authHeader = req.headers.authorization;
-    const token = authHeader?.replace('Bearer ', '').trim();
+    const token = extractToken(req);
 
     if (!token) {
       return res.json({ user: null });
@@ -249,33 +312,41 @@ router.get('/session', async (req: Request, res: Response) => {
 
 router.put('/profile', async (req: Request, res: Response) => {
   try {
-    const authHeader = req.headers.authorization;
-    const token = authHeader?.replace('Bearer ', '').trim();
+    const token = extractToken(req);
     if (!token) return res.status(401).json({ error: 'Unauthorized' });
 
     const user = await getUserByToken(token);
     if (!user) return res.status(401).json({ error: 'Invalid or expired session' });
 
     const { name, age, city, plan } = req.body;
-    const updates: string[] = [];
-    const values: any[] = [];
-    let idx = 1;
+    const sets: Prisma.Sql[] = [];
 
-    if (name !== undefined) { updates.push(`display_name = $${idx++}`); values.push(name.trim()); }
-    if (age !== undefined) { updates.push(`age = $${idx++}`); values.push(parseInt(age, 10)); }
-    if (city !== undefined) { updates.push(`city = $${idx++}`); values.push(city); }
+    if (name !== undefined) {
+      sets.push(Prisma.sql`display_name = ${String(name).trim().slice(0, 50)}`);
+    }
+    if (age !== undefined) {
+      const parsedAge = parseInt(age, 10);
+      if (Number.isFinite(parsedAge)) {
+        sets.push(Prisma.sql`age = ${Math.max(1, Math.min(120, parsedAge))}`);
+      }
+    }
+    if (city !== undefined) {
+      const safeCity = String(city).trim().slice(0, 50);
+      if (!ISRAEL_CITIES.has(safeCity)) {
+        return res.status(400).json({ error: 'Invalid city' });
+      }
+      sets.push(Prisma.sql`city = ${safeCity}`);
+    }
     if (plan !== undefined && ['free', 'pro', 'max'].includes(plan)) {
-      updates.push(`plan = $${idx++}`); values.push(plan);
+      sets.push(Prisma.sql`plan = ${plan}`);
     }
 
-    if (updates.length === 0) return res.status(400).json({ error: 'No fields to update' });
+    if (sets.length === 0) return res.status(400).json({ error: 'No fields to update' });
 
-    updates.push(`updated_at = NOW()`);
-    values.push(user.id);
+    sets.push(Prisma.sql`updated_at = NOW()`);
 
-    await prisma.$executeRawUnsafe(
-      `UPDATE users SET ${updates.join(', ')} WHERE id = $${idx}`,
-      ...values
+    await prisma.$executeRaw(
+      Prisma.sql`UPDATE users SET ${Prisma.join(sets, ', ')} WHERE id = ${user.id}`
     );
 
     const updated = await prisma.$queryRawUnsafe<any[]>('SELECT * FROM users WHERE id = $1', user.id);
@@ -291,19 +362,30 @@ router.put('/profile', async (req: Request, res: Response) => {
 
 router.put('/preferences', async (req: Request, res: Response) => {
   try {
-    const authHeader = req.headers.authorization;
-    const token = authHeader?.replace('Bearer ', '').trim();
+    const token = extractToken(req);
     if (!token) return res.status(401).json({ error: 'Unauthorized' });
 
     const user = await getUserByToken(token);
     if (!user) return res.status(401).json({ error: 'Invalid or expired session' });
 
-    const { city, theme, language, ...rest } = req.body;
+    const { city, theme, language } = req.body;
+    // Only allow specific whitelisted keys in preferences to prevent storing arbitrary data
+    const ALLOWED_PREF_KEYS = new Set(['city', 'theme', 'language', 'defaultStore', 'defaultChain', 'notifications']);
     const current = user.preferences || {};
-    const merged = { ...current, ...rest };
-    if (city !== undefined) merged.city = city;
-    if (theme !== undefined) merged.theme = theme;
-    if (language !== undefined) merged.language = language;
+    const merged: Record<string, unknown> = {};
+    // Carry over existing whitelisted keys only
+    for (const key of ALLOWED_PREF_KEYS) {
+      if (key in current) merged[key] = current[key];
+    }
+    if (city !== undefined) {
+      const safeCity = String(city).trim().slice(0, 50);
+      if (!ISRAEL_CITIES.has(safeCity)) {
+        return res.status(400).json({ error: 'Invalid city' });
+      }
+      merged.city = safeCity;
+    }
+    if (theme !== undefined) merged.theme = String(theme).trim().slice(0, 20);
+    if (language !== undefined) merged.language = String(language).trim().slice(0, 10);
 
     // Also update city column directly if provided
     if (city !== undefined) {
@@ -330,8 +412,7 @@ router.put('/preferences', async (req: Request, res: Response) => {
 
 router.post('/change-password', async (req: Request, res: Response) => {
   try {
-    const authHeader = req.headers.authorization;
-    const token = authHeader?.replace('Bearer ', '').trim();
+    const token = extractToken(req);
     if (!token) return res.status(401).json({ error: 'Unauthorized' });
 
     const user = await getUserByToken(token);
@@ -363,8 +444,7 @@ router.post('/change-password', async (req: Request, res: Response) => {
 
 router.post('/cart/sync', async (req: Request, res: Response) => {
   try {
-    const authHeader = req.headers.authorization;
-    const token = authHeader?.replace('Bearer ', '').trim();
+    const token = extractToken(req);
     if (!token) return res.status(401).json({ error: 'Unauthorized' });
 
     const user = await getUserByToken(token);
@@ -372,8 +452,9 @@ router.post('/cart/sync', async (req: Request, res: Response) => {
 
     const { cart, name } = req.body;
     if (!Array.isArray(cart)) return res.status(400).json({ error: 'cart must be an array' });
+    if (cart.length > 200) return res.status(400).json({ error: 'Cart too large (max 200 items)' });
 
-    const cartName = name || 'Mon panier';
+    const cartName = (typeof name === 'string' ? name.trim().slice(0, 100) : '') || 'Mon panier';
     const expiresAt = new Date(Date.now() + 2 * 24 * 60 * 60 * 1000);
 
     // Upsert: delete old ones, insert new
@@ -398,8 +479,7 @@ router.post('/cart/sync', async (req: Request, res: Response) => {
 
 router.get('/cart', async (req: Request, res: Response) => {
   try {
-    const authHeader = req.headers.authorization;
-    const token = authHeader?.replace('Bearer ', '').trim();
+    const token = extractToken(req);
     if (!token) return res.status(401).json({ error: 'Unauthorized' });
 
     const user = await getUserByToken(token);
@@ -429,8 +509,7 @@ const PLAN_ORDER: Record<string, number> = { free: 0, pro: 1, max: 2 };
 
 router.get('/subscription', async (req: Request, res: Response) => {
   try {
-    const authHeader = req.headers.authorization;
-    const token = authHeader?.replace('Bearer ', '').trim();
+    const token = extractToken(req);
     if (!token) return res.status(401).json({ error: 'Unauthorized' });
 
     const user = await getUserByToken(token);
@@ -455,8 +534,7 @@ router.get('/subscription', async (req: Request, res: Response) => {
 
 router.post('/subscription/upgrade', async (req: Request, res: Response) => {
   try {
-    const authHeader = req.headers.authorization;
-    const token = authHeader?.replace('Bearer ', '').trim();
+    const token = extractToken(req);
     if (!token) return res.status(401).json({ error: 'Unauthorized' });
 
     const user = await getUserByToken(token);
@@ -538,8 +616,7 @@ router.post('/subscription/upgrade', async (req: Request, res: Response) => {
 
 router.post('/subscription/cancel', async (req: Request, res: Response) => {
   try {
-    const authHeader = req.headers.authorization;
-    const token = authHeader?.replace('Bearer ', '').trim();
+    const token = extractToken(req);
     if (!token) return res.status(401).json({ error: 'Unauthorized' });
 
     const user = await getUserByToken(token);
@@ -577,8 +654,7 @@ router.post('/subscription/cancel', async (req: Request, res: Response) => {
 
 router.post('/subscription/renew', async (req: Request, res: Response) => {
   try {
-    const authHeader = req.headers.authorization;
-    const token = authHeader?.replace('Bearer ', '').trim();
+    const token = extractToken(req);
     if (!token) return res.status(401).json({ error: 'Unauthorized' });
 
     const user = await getUserByToken(token);

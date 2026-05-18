@@ -4,6 +4,7 @@ import https from 'https';
 
 const router = Router();
 const GOOGLE_TRANSLATE_API = 'https://translation.googleapis.com/language/translate/v2';
+const TRANSLATION_CACHE_MAX = 1000;
 const translationCache = new Map<string, TranslationResponse>();
 
 type TranslationResponse = {
@@ -30,15 +31,17 @@ router.post('/', async (req, res) => {
   if (typeof q !== 'string' || !q.trim()) {
     return res.status(400).json({ error: 'q is required' });
   }
+  if (q.length > 500) {
+    return res.status(400).json({ error: 'Query too long (max 500 characters)' });
+  }
 
   const apiKey = process.env.GOOGLE_TRANSLATE_API_KEY;
   if (!apiKey) {
-    return res.status(500).json({ error: 'Missing GOOGLE_TRANSLATE_API_KEY' });
+    return res.status(500).json({ error: 'Translation service unavailable' });
   }
 
-  const googleTranslateHttpsAgent = new https.Agent({
-    rejectUnauthorized: process.env.GOOGLE_TRANSLATE_STRICT_TLS !== 'false',
-  });
+  // TLS verification always enforced — do not disable via env var
+  const googleTranslateHttpsAgent = new https.Agent({ rejectUnauthorized: true });
 
   const normalizedQuery = q.trim();
   const normalizedSource = typeof source === 'string' ? source : 'auto';
@@ -82,6 +85,11 @@ router.post('/', async (req, res) => {
     };
 
     translationCache.set(cacheKey, responseBody);
+    // Evict oldest entries if cache exceeds max size
+    if (translationCache.size > TRANSLATION_CACHE_MAX) {
+      const firstKey = translationCache.keys().next().value;
+      if (firstKey !== undefined) translationCache.delete(firstKey);
+    }
 
     return res.json({ ...responseBody, cached: false });
   } catch (err: any) {
@@ -89,7 +97,7 @@ router.post('/', async (req, res) => {
     if (status) {
       return res.status(502).json({ error: 'Translation service error', status });
     }
-    return res.status(502).json({ error: 'Translation service unreachable', detail: String(err?.message ?? err) });
+    return res.status(502).json({ error: 'Translation service unreachable' });
   }
 });
 

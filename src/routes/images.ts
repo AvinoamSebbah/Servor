@@ -16,15 +16,20 @@ const router = Router();
 
 const IMAGE_NEGATIVE_CACHE_TTL_MS = 30 * 60 * 1000;
 
+// Barcode must be 8-14 digits (EAN-8, EAN-13, EAN-14)
+const BARCODE_RE = /^\d{8,14}$/;
+
+function isValidBarcode(code: string): boolean {
+  return BARCODE_RE.test(code);
+}
+
 type NegativeImageCacheEntry = {
   expiresAt: number;
 };
 
 const negativeImageCache = new Map<string, NegativeImageCacheEntry>();
-const skipTlsVerify = String(process.env.DO_SPACES_SKIP_TLS_VERIFY || '').trim().toLowerCase() === 'true';
-const externalHttpsAgent = new https.Agent({
-  rejectUnauthorized: !skipTlsVerify,
-});
+// TLS verification always enforced for external image fetches
+const externalHttpsAgent = new https.Agent({ rejectUnauthorized: true });
 
 if (
   process.env.CLOUDINARY_CLOUD_NAME &&
@@ -94,9 +99,7 @@ function createS3Client(): S3Client {
       secretAccessKey,
     },
     requestHandler: new NodeHttpHandler({
-      httpsAgent: new https.Agent({
-        rejectUnauthorized: !skipTlsVerify,
-      }),
+      httpsAgent: new https.Agent({ rejectUnauthorized: true }),
     }),
   });
 }
@@ -171,7 +174,7 @@ async function uploadRemoteImageToSpaces(key: string, remoteUrl: string, source:
     validateStatus: (status) => status >= 200 && status < 300,
   });
 
-  const contentType = response.headers['content-type'] || 'image/jpeg';
+  const contentType = String(response.headers['content-type'] || 'image/jpeg').split(';')[0].trim();
   const body = new PassThrough();
   const upload = new Upload({
     client: s3,
@@ -216,6 +219,9 @@ function getSignedCatalogDeliveryUrl(id: string, width = 320, height = 320): str
 }
 
 async function findAndPersistMissingImage(barcode: string, key: string): Promise<{ imageUrl: string | null; source: string }> {
+  if (!isValidBarcode(barcode)) {
+    return { imageUrl: null, source: 'invalid-barcode' };
+  }
   const pricezUrl = `https://m.pricez.co.il/ProductPictures/200x/${encodeURIComponent(barcode)}.jpg`;
 
   if (isCloudinaryBridgeEnabled()) {
@@ -275,11 +281,12 @@ export function getProductDeliveryUrl(barcode: string): string | null {
   return getSignedProductDeliveryUrl(barcode);
 }
 
-function resolveLocalStoreLogo(reqHost: string, protocol: string, slug: string): string | null {
+function resolveLocalStoreLogo(slug: string): string | null {
   const storesDir = path.join(__dirname, '../../public/images/stores');
+  const backendBaseUrl = process.env.BACKEND_BASE_URL || 'http://localhost:3001';
   for (const ext of ['.jpg', '.jpeg', '.png', '.webp']) {
     if (fs.existsSync(path.join(storesDir, slug + ext))) {
-      return `${protocol}://${reqHost}/images/stores/${slug}${ext}`;
+      return `${backendBaseUrl}/images/stores/${slug}${ext}`;
     }
   }
   return null;
@@ -407,7 +414,7 @@ router.get('/store-logo/by-name/:chainName', async (req, res) => {
 
     const imageUrl =
       getStoreLogoUrl(slug) ||
-      resolveLocalStoreLogo(req.get('host') || '', req.protocol, slug);
+      resolveLocalStoreLogo(slug);
 
     return res.json({ imageUrl, chainName, slug });
   } catch (error) {

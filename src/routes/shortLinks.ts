@@ -1,6 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { PrismaClient } from '@prisma/client';
-import { createHash, randomInt } from 'crypto';
+import { createHash, randomInt, randomBytes } from 'crypto';
 import { SHARE_IMAGE_HEIGHT, SHARE_IMAGE_WIDTH, parseShareLang } from '../utils/shareImage';
 
 const router = Router();
@@ -35,10 +35,12 @@ function esc(str: string): string {
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#x27;');
 }
 
 function getBackendBaseUrl(req: Request): string {
+  if (process.env.BACKEND_BASE_URL) return process.env.BACKEND_BASE_URL;
   const protocol = req.headers['x-forwarded-proto']?.toString().split(',')[0] || req.protocol;
   const host = req.headers['x-forwarded-host']?.toString().split(',')[0] || req.get('host') || 'localhost:3001';
   return `${protocol}://${host}`;
@@ -178,7 +180,7 @@ router.post('/api/share-links', async (req: Request, res: Response) => {
 });
 
 router.get('/s/:code', async (req: Request, res: Response) => {
-  const code = req.params.code.toLowerCase();
+  const code = String(req.params.code).toLowerCase();
 
   try {
     await ensureShareLinksTable();
@@ -204,12 +206,15 @@ router.get('/s/:code', async (req: Request, res: Response) => {
     const title = esc(row.title);
     const description = esc(row.description || 'Agali');
     const imageUrl = esc(absoluteBackendUrl(req, row.image_path));
-    const redirectUrl = esc(absoluteFrontendUrl(row.redirect_path));
+    const rawRedirectUrl = absoluteFrontendUrl(row.redirect_path);
+    const redirectUrl = esc(rawRedirectUrl);
     const shortUrl = esc(`${getShortBaseUrl(req)}/s/${row.code}`);
     const lang = parseShareLang(row.lang);
 
+    const nonce = randomBytes(16).toString('base64');
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
     res.setHeader('Cache-Control', 'public, max-age=60');
+    res.setHeader('Content-Security-Policy', `default-src 'none'; script-src 'nonce-${nonce}'; frame-ancestors 'none'`);
     return res.send(`<!DOCTYPE html>
 <html lang="${lang}" dir="${lang === 'he' ? 'rtl' : 'ltr'}">
 <head>
@@ -231,7 +236,7 @@ router.get('/s/:code', async (req: Request, res: Response) => {
   <meta http-equiv="refresh" content="0;url=${redirectUrl}" />
 </head>
 <body>
-  <script>window.location.replace("${redirectUrl}");</script>
+  <script nonce="${nonce}">window.location.replace(${JSON.stringify(rawRedirectUrl)});</script>
   <p>Redirecting...</p>
 </body>
 </html>`);
