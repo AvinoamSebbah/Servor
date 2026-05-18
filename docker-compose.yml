@@ -17,7 +17,9 @@ services:
       POSTGRES_DB: ${POSTGRES_DB}
     volumes:
       - ./postgres_data:/var/lib/postgresql/data
-    # Port 5432 intentionally NOT exposed to host — DB is only accessible within Docker network
+    # Keep PostgreSQL private: reachable from the host only, never from the public Internet.
+    ports:
+      - "127.0.0.1:5432:5432"
 
   backend:
     build: .
