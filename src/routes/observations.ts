@@ -44,6 +44,7 @@ router.get('/', async (req: Request, res: Response) => {
   try {
     const rows = await prisma.$queryRawUnsafe<any[]>(
       `SELECT o.id, o.item_code, o.city, o.store_id, o.min_discount_pct,
+              o.base_price, o.target_price,
               o.status, o.expires_at, o.created_at,
               p.item_name
        FROM observations o
