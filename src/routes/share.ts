@@ -90,6 +90,13 @@ function buildPromoImageParams(input: {
   return params;
 }
 
+function sendSharePng(res: Response, png: Buffer, cacheControl: string) {
+  res.setHeader('Content-Type', 'image/png');
+  res.setHeader('Cache-Control', cacheControl);
+  res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
+  return res.send(png);
+}
+
 async function sendProductSharePage(req: Request, res: Response, barcode: string) {
   const city = shortString(req.query.city) || shortString(req.query.c);
   const theme = parseShortTheme(req.query.theme ?? req.query.t);
@@ -214,9 +221,7 @@ router.get('/product/:barcode/image', async (req: Request, res: Response) => {
 
   try {
     const png = await generateProductShareImage(prisma, barcode, city, theme, lang);
-    res.setHeader('Content-Type', 'image/png');
-    res.setHeader('Cache-Control', 'public, max-age=3600');
-    return res.send(png);
+    return sendSharePng(res, png, 'public, max-age=3600');
   } catch (error) {
     console.error('[GET /share/product/:barcode/image]', error);
     return res.status(500).json({ error: 'Failed to generate share image' });
@@ -237,9 +242,7 @@ router.get('/site/image', async (req: Request, res: Response) => {
 
   try {
     const png = await generateSiteShareImage(theme, lang);
-    res.setHeader('Content-Type', 'image/png');
-    res.setHeader('Cache-Control', 'public, max-age=86400');
-    return res.send(png);
+    return sendSharePng(res, png, 'public, max-age=86400');
   } catch (error) {
     console.error('[GET /share/site/image]', error);
     return res.status(500).json({ error: 'Failed to generate site share image' });
@@ -303,9 +306,7 @@ router.get('/promo/:itemCode/image', async (req: Request, res: Response) => {
 
   try {
     const png = await generatePromoShareImage(prisma, { itemCode, chainId, storeId, promotionId, city }, theme, lang);
-    res.setHeader('Content-Type', 'image/png');
-    res.setHeader('Cache-Control', 'public, max-age=1800');
-    return res.send(png);
+    return sendSharePng(res, png, 'public, max-age=1800');
   } catch (error) {
     console.error('[GET /share/promo/:itemCode/image]', error);
     return res.status(500).json({ error: 'Failed to generate promo share image' });
@@ -332,9 +333,7 @@ router.get('/promotions/image', async (req: Request, res: Response) => {
 
   try {
     const png = await generatePromotionsShareImage(prisma, { city, chainId, chainName, storeId }, theme, lang);
-    res.setHeader('Content-Type', 'image/png');
-    res.setHeader('Cache-Control', 'public, max-age=1800');
-    return res.send(png);
+    return sendSharePng(res, png, 'public, max-age=1800');
   } catch (error) {
     console.error('[GET /share/promotions/image]', error);
     return res.status(500).json({ error: 'Failed to generate promotions share image' });
@@ -430,9 +429,7 @@ router.get('/:code/image', async (req: Request, res: Response) => {
     const { name, items } = rows[0];
     const rawItems = typeof items === 'string' ? JSON.parse(items) : items;
     const png = await generateShoppingListShareImage(name, rawItems, theme, lang);
-    res.setHeader('Content-Type', 'image/png');
-    res.setHeader('Cache-Control', 'public, max-age=60');
-    return res.send(png);
+    return sendSharePng(res, png, 'public, max-age=60');
   } catch (error) {
     console.error('[GET /share/:code/image]', error);
     return res.status(500).json({ error: 'Failed to generate shopping list share image' });

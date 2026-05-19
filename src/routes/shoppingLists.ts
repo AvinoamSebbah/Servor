@@ -44,6 +44,17 @@ function broadcast(code: string, payload: object) {
 // crypto.randomInt → cryptographically secure, 32^20 ≈ 10^30 combinations
 const ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 const CODE_LENGTH = 20;
+// Accept legacy short codes (5 chars) created before the security upgrade,
+// up to the new 24-char ceiling. The alphabet is locked and the SQL query
+// remains parameterized, so this only widens the length acceptance window.
+const CODE_MIN_LENGTH = 5;
+const CODE_MAX_LENGTH = 24;
+const CODE_REGEX = new RegExp(`^[${ALPHABET}]{${CODE_MIN_LENGTH},${CODE_MAX_LENGTH}}$`);
+
+function isValidCode(value: unknown): value is string {
+  return typeof value === 'string' && CODE_REGEX.test(value);
+}
+
 function generateCode(): string {
   let code = '';
   for (let i = 0; i < CODE_LENGTH; i++) {
@@ -103,8 +114,8 @@ router.post('/', async (req: Request, res: Response) => {
 // ─── GET /api/lists/:code — lire une liste ─────────────────────────────────
 router.get('/:code', async (req: Request, res: Response) => {
   try {
-    const code = String(req.params.code);
-    if (!code || code.length !== 20) {
+    const code = String(req.params.code).toUpperCase();
+    if (!isValidCode(code)) {
       return res.status(400).json({ error: 'קוד לא תקין' });
     }
 
@@ -112,7 +123,7 @@ router.get('/:code', async (req: Request, res: Response) => {
       id: string; code: string; name: string; items: any; updated_at: string;
     }[]>(
       `SELECT id, code, name, items, updated_at FROM shopping_lists WHERE code = $1 LIMIT 1`,
-      code.toUpperCase()
+      code
     );
 
     if (rows.length === 0) {
@@ -129,10 +140,10 @@ router.get('/:code', async (req: Request, res: Response) => {
 // ─── PATCH /api/lists/:code — mettre à jour items + broadcast ─────────────
 router.patch('/:code', listsMutateLimiter, async (req: Request, res: Response) => {
   try {
-    const code = String(req.params.code);
+    const code = String(req.params.code).toUpperCase();
     const { items, name } = req.body;
 
-    if (!code || code.length !== 20) {
+    if (!isValidCode(code)) {
       return res.status(400).json({ error: 'קוד לא תקין' });
     }
 
@@ -158,7 +169,7 @@ router.patch('/:code', listsMutateLimiter, async (req: Request, res: Response) =
       return res.status(400).json({ error: 'אין שינויים לשמור' });
     }
 
-    values.push(code.toUpperCase());
+    values.push(code);
     const query = `UPDATE shopping_lists SET ${setClauses.join(', ')} WHERE code = $${idx} RETURNING id, code, name, items, updated_at`;
 
     const rows = await prisma.$queryRawUnsafe<{
@@ -171,7 +182,7 @@ router.patch('/:code', listsMutateLimiter, async (req: Request, res: Response) =
 
     const updated = rows[0];
     // Broadcast to all SSE subscribers for this code
-    broadcast(code.toUpperCase(), { type: 'list_updated', ...updated });
+    broadcast(code, { type: 'list_updated', ...updated });
 
     return res.json(updated);
   } catch (err) {
@@ -182,13 +193,11 @@ router.patch('/:code', listsMutateLimiter, async (req: Request, res: Response) =
 
 // ─── GET /api/lists/:code/stream — SSE live updates ───────────────────────
 router.get('/:code/stream', (req: Request, res: Response) => {
-  const code = String(req.params.code);
-  if (!code || code.length !== 20) {
+  const upperCode = String(req.params.code).toUpperCase();
+  if (!isValidCode(upperCode)) {
     res.status(400).end();
     return;
   }
-
-  const upperCode = code.toUpperCase();
 
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache, no-transform');

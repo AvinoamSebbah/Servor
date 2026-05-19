@@ -1170,6 +1170,12 @@ router.get('/search-lite', async (req, res) => {
     const offsetRaw = Number.parseInt(String(req.query.offset ?? '0'), 10);
     const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? Math.min(limitRaw, 30) : 12;
     const offset = Number.isFinite(offsetRaw) && offsetRaw >= 0 ? offsetRaw : 0;
+    // Opt-in flag: when true, restrict to products with a confirmed image
+    // (products.has_image IS TRUE). Used by the shopping list DB search so
+    // we never render a product without a working image.
+    const withImageOnlyRaw = String(req.query.withImageOnly ?? '').toLowerCase();
+    const withImageOnly = withImageOnlyRaw === '1' || withImageOnlyRaw === 'true';
+    const hasImageFilter = withImageOnly ? Prisma.sql`AND p.has_image IS TRUE` : Prisma.empty;
 
     if (!query) return res.status(400).json({ error: 'q is required' });
     if (query.length > 200) return res.status(400).json({ error: 'Query too long (max 200 characters)' });
@@ -1197,8 +1203,9 @@ router.get('/search-lite', async (req, res) => {
           COALESCE(pss.chain_count, 0)::integer AS chain_count
         FROM products p
         LEFT JOIN product_search_stats pss ON pss.product_id = p.id
-        WHERE lower(COALESCE(p.item_name, '')) LIKE lower(${query}) || '%'
-           OR lower(COALESCE(p.manufacturer_name, '')) LIKE lower(${query}) || '%'
+        WHERE (lower(COALESCE(p.item_name, '')) LIKE lower(${query}) || '%'
+           OR lower(COALESCE(p.manufacturer_name, '')) LIKE lower(${query}) || '%')
+          ${hasImageFilter}
         ORDER BY chain_count DESC NULLS LAST, p.item_name ASC NULLS LAST, p.item_code ASC
         LIMIT ${fetchLimit}::integer
         OFFSET ${offset}::integer
@@ -1228,6 +1235,7 @@ router.get('/search-lite', async (req, res) => {
           FROM products p
           CROSS JOIN params
           WHERE p.search_idx_col @@ params.tsq
+            ${hasImageFilter}
           ORDER BY text_rank DESC NULLS LAST, p.item_code ASC
           LIMIT 300
         )
@@ -1271,6 +1279,7 @@ router.get('/search-lite', async (req, res) => {
               p.item_name % params.raw_query
               OR p.manufacturer_name % params.raw_query
             )
+            ${hasImageFilter}
             ${existingProductIds.length > 0
               ? Prisma.sql`AND p.id <> ALL(${existingProductIds}::int[])`
               : Prisma.empty}

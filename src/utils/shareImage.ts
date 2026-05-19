@@ -1,11 +1,19 @@
 import fs from 'fs/promises';
-import https from 'https';
 import path from 'path';
+import tls from 'tls';
 import { Prisma, PrismaClient } from '@prisma/client';
 import { Resvg } from '@resvg/resvg-js';
 import axios from 'axios';
 import sharp from 'sharp';
-import { getCatalogImageUrl, getProductImageUrl } from './media';
+import getImageUrl from './getImageUrl';
+import {
+  getCatalogImagePath,
+  getCatalogImageUrl,
+  getProductImagePath,
+  getProductImageUrl,
+  getStoreLogoPath,
+  getStoreLogoUrl,
+} from './media';
 
 type ShareTheme = 'dark' | 'light';
 type ShareLang = 'he' | 'fr' | 'en';
@@ -123,6 +131,63 @@ const REMOTE_TEXT_CACHE = new Map<string, string | null>();
 const PUBLIC_FRONTEND_BASE_URL = 'https://agali.live';
 const LOCAL_PUBLIC_DIR = path.resolve(process.cwd(), 'public');
 const LOCAL_AGALI_LOGO_PATH = path.join(LOCAL_PUBLIC_DIR, 'logo.png');
+let assetFetchTrustStoreConfigured = false;
+
+function ensureAssetFetchTrustStore() {
+  if (assetFetchTrustStoreConfigured) return;
+  assetFetchTrustStoreConfigured = true;
+
+  try {
+    const tlsWithCa = tls as typeof tls & {
+      getCACertificates?: (type?: 'bundled' | 'system' | 'default') => string[];
+      setDefaultCACertificates?: (certs: string[]) => void;
+    };
+    if (!tlsWithCa.getCACertificates || !tlsWithCa.setDefaultCACertificates) return;
+
+    const bundledCertificates = tlsWithCa.getCACertificates('bundled');
+    const systemCertificates = tlsWithCa.getCACertificates('system');
+    if (systemCertificates.length === 0) return;
+
+    tlsWithCa.setDefaultCACertificates([...new Set([...bundledCertificates, ...systemCertificates])]);
+  } catch {
+    // Keep the bundled Node trust store if the host does not expose a system store.
+  }
+}
+
+function signedImageUrl(imagePath: string, width: number, height: number): string | null {
+  try {
+    return getImageUrl(imagePath, width, height);
+  } catch {
+    return null;
+  }
+}
+
+function signedProductImageUrl(itemCode: string, width = 460, height = 460): string | null {
+  const normalized = String(itemCode || '').trim();
+  if (!normalized) return null;
+  return signedImageUrl(getProductImagePath(normalized), width, height);
+}
+
+function signedCatalogImageUrl(id: string, width = 320, height = 320): string | null {
+  const normalized = String(id || '').trim();
+  if (
+    !normalized ||
+    normalized.startsWith('custom_') ||
+    normalized.startsWith('custom_preview_') ||
+    normalized === 'cat_other' ||
+    normalized === 'sub_other'
+  ) {
+    return null;
+  }
+
+  return signedImageUrl(getCatalogImagePath(normalized), width, height);
+}
+
+function signedStoreLogoUrl(slug: string, width = 180, height = 180): string | null {
+  const normalized = String(slug || '').trim();
+  if (!normalized) return null;
+  return signedImageUrl(getStoreLogoPath(normalized), width, height);
+}
 
 function escapeXml(value: string): string {
   return value
@@ -329,11 +394,13 @@ async function readFileDataUri(filePath: string, contentType: string): Promise<s
   }
 }
 
-async function fetchDataUri(url: string): Promise<string | null> {
+async function fetchDataUri(url: string, options?: { rasterizeImage?: boolean }): Promise<string | null> {
   try {
+    ensureAssetFetchTrustStore();
     const response = await axios.get<ArrayBuffer>(url, {
       responseType: 'arraybuffer',
       timeout: 10000,
+      maxRedirects: 5,
       headers: {
         'User-Agent': 'Mozilla/5.0 AgaliSharePreview/1.0',
       },
@@ -341,7 +408,10 @@ async function fetchDataUri(url: string): Promise<string | null> {
     const typeHeader = String(response.headers['content-type'] || 'image/jpeg');
     let buffer = Buffer.from(response.data);
     let type = detectContentType(buffer, typeHeader.split(';')[0]);
-    if (type === 'image/webp') {
+    if (options?.rasterizeImage && type.startsWith('image/')) {
+      buffer = Buffer.from(await sharp(buffer).rotate().png().toBuffer());
+      type = 'image/png';
+    } else if (type === 'image/webp') {
       buffer = Buffer.from(await sharp(buffer).png().toBuffer());
       type = 'image/png';
     }
@@ -349,6 +419,10 @@ async function fetchDataUri(url: string): Promise<string | null> {
   } catch {
     return null;
   }
+}
+
+async function fetchImageDataUri(url: string): Promise<string | null> {
+  return fetchDataUri(url, { rasterizeImage: true });
 }
 
 async function fetchText(url: string): Promise<string | null> {
@@ -543,9 +617,7 @@ export async function getProductShareMeta(
 
   const offers = await Promise.all(
     topChainOffers.map(async (offer) => {
-      const slug = resolveChainSlug(offer.chainName, offer.chainId);
-      const logoUrl = slug ? `${PUBLIC_FRONTEND_BASE_URL}/images/stores/${slug}.jpg` : '';
-      const logoDataUri = slug ? await fetchDataUri(logoUrl) : null;
+      const logoDataUri = await chainLogoDataUri(offer.chainName, offer.chainId);
       return { ...offer, logoDataUri };
     })
   );
@@ -571,15 +643,16 @@ async function generateProductShareImageLegacy(
   const fontCss = await buildEmbeddedFontCss();
   const logoDataUri =
     (await readFileDataUri(LOCAL_AGALI_LOGO_PATH, 'image/png')) ??
-    (await fetchDataUri(`${PUBLIC_FRONTEND_BASE_URL}/logo.png`));
+    (await fetchImageDataUri(`${PUBLIC_FRONTEND_BASE_URL}/logo.png`));
   const productImageCandidates = [
+    signedProductImageUrl(barcode, 360, 360),
     getProductImageUrl(barcode),
     `https://m.pricez.co.il/ProductPictures/200x/${encodeURIComponent(barcode)}.jpg`,
     `https://res.cloudinary.com/dprve5nst/image/upload/w_360,h_360,c_pad,b_white/products/${encodeURIComponent(barcode)}.jpg`,
   ].filter(Boolean) as string[];
   let productImageDataUri: string | null = null;
   for (const url of productImageCandidates) {
-    productImageDataUri = await fetchDataUri(url);
+    productImageDataUri = await fetchImageDataUri(url);
     if (productImageDataUri) break;
   }
   const productLines = splitLines(meta.itemName, 30, 2);
@@ -934,7 +1007,7 @@ async function renderSocialSvg(svg: string): Promise<Buffer> {
 async function socialDefs(theme: ShareTheme): Promise<{ fontCss: string; logoDataUri: string | null }> {
   const [fontCss, logoDataUri] = await Promise.all([
     buildEmbeddedFontCss(),
-    readFileDataUri(LOCAL_AGALI_LOGO_PATH, 'image/png').then((local) => local ?? fetchDataUri(`${PUBLIC_FRONTEND_BASE_URL}/logo.png`)),
+    readFileDataUri(LOCAL_AGALI_LOGO_PATH, 'image/png').then((local) => local ?? fetchImageDataUri(`${PUBLIC_FRONTEND_BASE_URL}/logo.png`)),
   ]);
 
   return { fontCss, logoDataUri };
@@ -994,13 +1067,14 @@ function socialFrame({
 
 async function productImageDataUri(itemCode: string): Promise<string | null> {
   const candidates = [
+    signedProductImageUrl(itemCode, 460, 460),
     getProductImageUrl(itemCode),
     `https://m.pricez.co.il/ProductPictures/200x/${encodeURIComponent(itemCode)}.jpg`,
     `https://res.cloudinary.com/dprve5nst/image/upload/w_460,h_460,c_pad,b_white/products/${encodeURIComponent(itemCode)}.jpg`,
   ].filter(Boolean) as string[];
 
   for (const url of candidates) {
-    const dataUri = await fetchDataUri(url);
+    const dataUri = await fetchImageDataUri(url);
     if (dataUri) return dataUri;
   }
   return null;
@@ -1008,13 +1082,15 @@ async function productImageDataUri(itemCode: string): Promise<string | null> {
 
 async function catalogOrProductImageDataUri(productId: string, mappedItemCode: string | null): Promise<string | null> {
   const candidates = [
+    productId && !productId.startsWith('custom_') ? signedCatalogImageUrl(productId, 320, 320) : null,
     productId && !productId.startsWith('custom_') ? getCatalogImageUrl(productId) : null,
+    mappedItemCode ? signedProductImageUrl(mappedItemCode, 320, 320) : null,
     mappedItemCode ? getProductImageUrl(mappedItemCode) : null,
     mappedItemCode ? `https://m.pricez.co.il/ProductPictures/200x/${encodeURIComponent(mappedItemCode)}.jpg` : null,
   ].filter(Boolean) as string[];
 
   for (const url of candidates) {
-    const dataUri = await fetchDataUri(url);
+    const dataUri = await fetchImageDataUri(url);
     if (dataUri) return dataUri;
   }
   return null;
@@ -1023,7 +1099,17 @@ async function catalogOrProductImageDataUri(productId: string, mappedItemCode: s
 async function chainLogoDataUri(chainName: string, chainId?: string | null): Promise<string | null> {
   const slug = resolveChainSlug(chainName, chainId);
   if (!slug) return null;
-  return fetchDataUri(`${PUBLIC_FRONTEND_BASE_URL}/images/stores/${slug}.jpg`);
+  const candidates = [
+    `${PUBLIC_FRONTEND_BASE_URL}/images/stores/${slug}.jpg`,
+    signedStoreLogoUrl(slug, 180, 180),
+    getStoreLogoUrl(slug),
+  ].filter(Boolean) as string[];
+
+  for (const url of candidates) {
+    const dataUri = await fetchImageDataUri(url);
+    if (dataUri) return dataUri;
+  }
+  return null;
 }
 
 function mapPromotionRow(row: PromotionShareRow): Omit<SharePromotion, 'imageDataUri' | 'logoDataUri'> {

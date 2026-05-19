@@ -43,7 +43,10 @@ const upload = multer({
   },
 });
 
-function getBearerToken(req: Request): string | null {
+function extractToken(req: Request): string | null {
+  const cookieToken = req.cookies?.['auth_token'];
+  if (cookieToken && typeof cookieToken === 'string') return cookieToken.trim() || null;
+
   const authHeader = req.headers.authorization;
   if (!authHeader?.startsWith('Bearer ')) return null;
   return authHeader.slice('Bearer '.length).trim() || null;
@@ -130,7 +133,7 @@ async function forwardToReceiptOcr(files: Express.Multer.File[]): Promise<OcrBat
 
 async function analyzeReceipt(req: Request, res: Response) {
   try {
-    const token = getBearerToken(req);
+    const token = extractToken(req);
     if (!token) {
       return res.status(401).json({ error: 'Unauthorized' });
     }
