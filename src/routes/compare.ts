@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { PrismaClient, Prisma } from '@prisma/client';
 import { mapOfferRow } from '../services/offerMapping';
+import { enrichApiOffersWithPromoContext } from '../services/promoContext';
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -67,7 +68,22 @@ router.post('/', async (req, res) => {
     timingsMs.offersSql = Number(process.hrtime.bigint() - tOffersSql) / 1_000_000;
 
     // Normalize offers using mapOfferRow
-    const mappedOffers = offersRowsRaw.map(mapOfferRow);
+    const mappedOffersBase = offersRowsRaw.map(mapOfferRow);
+
+    // Enrich offers that have a promo with their promo classification (coupon/club/card/...)
+    // so we can exclude coupon promos from the compare totals (per product requirement).
+    const offersToEnrich = mappedOffersBase.filter((o) => o.promoPrice != null);
+    let enrichedMap: Map<string, typeof mappedOffersBase[number]> = new Map();
+    if (offersToEnrich.length > 0) {
+      const enriched = await enrichApiOffersWithPromoContext(prisma, offersToEnrich);
+      for (const offer of enriched) {
+        enrichedMap.set(`${offer.itemCode}::${offer.chainId}::${offer.storeId}`, offer);
+      }
+    }
+    const mappedOffers = mappedOffersBase.map((o) => {
+      const key = `${o.itemCode}::${o.chainId}::${o.storeId}`;
+      return enrichedMap.get(key) ?? o;
+    });
 
     // Group offers by store and pick cheapest offer per item per store
     const tGroup = process.hrtime.bigint();
@@ -87,17 +103,27 @@ router.post('/', async (req, res) => {
       }
       const entry = storeMap2.get(storeKey)!;
       const code = row.itemCode;
-      const priceVal = row.effectivePrice ?? row.promoPrice ?? row.price;
+      // Treat coupon promos as NOT a promo: fall back to the regular price.
+      const isCouponPromo = (row.promoKind || '').toLowerCase() === 'coupon';
+      const regularPriceRaw = row.price;
+      const regularPrice = typeof regularPriceRaw === 'number'
+        ? regularPriceRaw
+        : (regularPriceRaw === null ? null : Number(regularPriceRaw));
+      const priceVal = isCouponPromo
+        ? regularPrice
+        : (row.effectivePrice ?? row.promoPrice ?? row.price);
       const existing = entry.itemsMap.get(code);
       const numericPrice = typeof priceVal === 'number' ? priceVal : (priceVal === null ? null : Number(priceVal));
       if (numericPrice === null || !Number.isFinite(numericPrice)) continue;
       if (!existing || numericPrice < existing.price) {
+        const hasPromo = !isCouponPromo && row.promoPrice != null;
         entry.itemsMap.set(code, {
           itemCode: code,
           itemName: row.itemName,
           price: numericPrice,
-          hasPromo: row.promoPrice != null,
-          originalPrice: row.price != null ? (typeof row.price === 'number' ? row.price : Number(row.price)) : undefined,
+          hasPromo,
+          originalPrice: hasPromo && regularPrice !== null && Number.isFinite(regularPrice) ? regularPrice : undefined,
+          regularPrice: regularPrice !== null && Number.isFinite(regularPrice) ? regularPrice : undefined,
         });
       }
     }
@@ -118,6 +144,7 @@ router.post('/', async (req, res) => {
           quantity: qty,
           hasPromo: !!it.hasPromo,
           originalPrice: it.originalPrice,
+          regularPrice: it.regularPrice,
         });
         totalPrice += (it.price ?? 0) * qty;
       }
