@@ -40,16 +40,11 @@ function broadcast(code: string, payload: object) {
   }
 }
 
-// ─── Code generator: 20 chars alphanum sans ambiguïtés (sans O/0/I/1) ──────
-// crypto.randomInt → cryptographically secure, 32^20 ≈ 10^30 combinations
+// ─── Code generator: 5 chars alphanum sans ambiguïtés (sans O/0/I/1) ───────
+// crypto.randomInt → cryptographically secure, 32^5 ≈ 3.3 × 10^7 combinations
 const ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-const CODE_LENGTH = 20;
-// Accept legacy short codes (5 chars) created before the security upgrade,
-// up to the new 24-char ceiling. The alphabet is locked and the SQL query
-// remains parameterized, so this only widens the length acceptance window.
-const CODE_MIN_LENGTH = 5;
-const CODE_MAX_LENGTH = 24;
-const CODE_REGEX = new RegExp(`^[${ALPHABET}]{${CODE_MIN_LENGTH},${CODE_MAX_LENGTH}}$`);
+const CODE_LENGTH = 5;
+const CODE_REGEX = new RegExp(`^[${ALPHABET}]{${CODE_LENGTH}}$`);
 
 function isValidCode(value: unknown): value is string {
   return typeof value === 'string' && CODE_REGEX.test(value);

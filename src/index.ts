@@ -62,6 +62,11 @@ if (!process.env.BACKEND_BASE_URL && process.env.NODE_ENV === 'production') {
 // ── Security headers (helmet) + X-Powered-By ─────────────────────────────────
 app.disable('x-powered-by');
 app.use(helmet({
+  // The API is on api.agali.live and assets/images are consumed from the
+  // www.agali.live / agali.live frontend (and from imgproxy redirects).
+  // Helmet's default `same-origin` CORP breaks cross-origin <img> loads with
+  // ERR_BLOCKED_BY_RESPONSE.NotSameOrigin, so widen to cross-origin.
+  crossOriginResourcePolicy: { policy: 'cross-origin' },
   contentSecurityPolicy: {
     directives: {
       defaultSrc: ["'self'"],
