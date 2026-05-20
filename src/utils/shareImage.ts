@@ -14,6 +14,7 @@ import {
   getStoreLogoPath,
   getStoreLogoUrl,
 } from './media';
+import { cityScopedStoreSql } from './globalStores';
 
 type ShareTheme = 'dark' | 'light';
 type ShareLang = 'he' | 'fr' | 'en';
@@ -1165,7 +1166,7 @@ export async function getPromoShareMeta(prisma: PrismaClient, input: SharePromoI
       AND c.chain_id = ${chainId}::text
       AND (${input.storeId || null}::text IS NULL OR c.store_id = ${input.storeId || null}::text)
       AND (${input.promotionId || null}::text IS NULL OR c.promotion_id = ${input.promotionId || null}::text)
-      AND (${input.city || null}::text IS NULL OR c.city = ${input.city || null}::text)
+      AND ${cityScopedStoreSql('c', input.city || null, { prefix: false })}
       AND c.price IS NOT NULL
       AND c.effective_price IS NOT NULL
       AND c.effective_price < c.price
@@ -1202,7 +1203,7 @@ export async function getPromotionsShareMeta(
         ) AS rn
       FROM top_promotions_cache c
       WHERE c.scope_type = 'store'
-        AND c.city = ${city}::text
+        AND ${cityScopedStoreSql('c', city, { prefix: false })}
         AND c.has_image IS TRUE
         AND (${input.chainId || null}::text IS NULL OR c.chain_id = ${input.chainId || null}::text)
         AND (${input.chainName || null}::text IS NULL OR lower(c.chain_name) = lower(${input.chainName || null}::text))

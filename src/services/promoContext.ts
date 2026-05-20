@@ -32,9 +32,9 @@ export type RawPromoContextRow = {
 const HEBREW_LABELS: Record<PromoKind, string> = {
   regular: 'מבצע',
   coupon: 'קופון',
-  card: 'הטבת אשראי',
-  club: 'הטבת מועדון',
-  insurance: 'הטבת ביטוח',
+  card: 'אשראי',
+  club: 'מועדון',
+  insurance: 'ביטוח',
   conditional: 'הטבה מותנית',
 };
 
@@ -71,6 +71,8 @@ function hasClubId(clubIdRaw: string | null | undefined): boolean {
   if (['0', '0.0', '0.00', '0.000', 'no_body', 'none', 'null', 'nan'].includes(normalized)) {
     return false;
   }
+  if (/^0(?:[.,]0+)?(?:\s|[-:–—]|$)/.test(normalized)) return false;
+  if (hasAny(normalized, ['כלל הלקוחות', 'כל הלקוחות', 'all customers'])) return false;
 
   const numeric = parseMaybeNumber(clubIdRaw);
   if (numeric !== null) return numeric > 0;

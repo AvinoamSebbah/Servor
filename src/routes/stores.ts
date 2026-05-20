@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { PrismaClient, Prisma } from '@prisma/client';
+import { cityScopedStoreSql } from '../utils/globalStores';
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -8,6 +9,7 @@ router.get('/filters', async (req, res) => {
   try {
     const city = typeof req.query.city === 'string' ? req.query.city.trim() : '';
     const chainId = typeof req.query.chainId === 'string' ? req.query.chainId.trim() : '';
+    const chainName = typeof req.query.chainName === 'string' ? req.query.chainName.trim() : '';
 
     type ChainFilterRow = {
       chain_id: string;
@@ -28,7 +30,7 @@ router.get('/filters', async (req, res) => {
           s.chain_id,
           COALESCE(NULLIF(s.chain_name, ''), s.chain_id)::text AS chain_name
         FROM stores s
-        WHERE (${city || null}::text IS NULL OR s.city ILIKE ${city || null}::text || '%')
+        WHERE ${cityScopedStoreSql('s', city || null)}
         ORDER BY chain_name ASC
         LIMIT 100
       `),
@@ -40,8 +42,9 @@ router.get('/filters', async (req, res) => {
           COALESCE(NULLIF(s.store_name, ''), s.store_id)::text AS store_name,
           s.city::text AS city
         FROM stores s
-        WHERE (${city || null}::text IS NULL OR s.city ILIKE ${city || null}::text || '%')
+        WHERE ${cityScopedStoreSql('s', city || null)}
           AND (${chainId || null}::text IS NULL OR s.chain_id = ${chainId || null}::text)
+          AND (${chainName || null}::text IS NULL OR lower(s.chain_name) = lower(${chainName || null}::text))
         ORDER BY chain_name ASC, store_name ASC
         LIMIT 500
       `),
@@ -71,7 +74,6 @@ router.get('/filters', async (req, res) => {
 router.get('/chain/:chainId', async (req, res) => {
   try {
     const { chainId } = req.params;
-    console.log('Listing stores for chainId:', chainId);
 
     type StoreRow = {
       id: number;
@@ -116,7 +118,6 @@ router.get('/chain/:chainId', async (req, res) => {
 router.get('/:chainId/:storeId', async (req, res) => {
   try {
     const { chainId, storeId } = req.params;
-    console.log('Fetching store with chainId:', chainId, 'and storeId:', storeId);
 
     type StoreRow = {
       id: number;
@@ -156,8 +157,6 @@ router.get('/:chainId/:storeId', async (req, res) => {
       LIMIT 1
     `);
 
-    console.log('Store query result:', rows);
-
     const row = rows[0];
     const store = row
       ? {
@@ -179,7 +178,6 @@ router.get('/:chainId/:storeId', async (req, res) => {
       : null;
 
     if (!store) {
-      console.log('Store not found for chainId:', chainId, 'storeId:', storeId);
       return res.status(404).json({ error: 'Store not found' });
     }
 
@@ -197,7 +195,6 @@ router.get('/:chainId/:storeId', async (req, res) => {
 router.get('/:storeId', async (req, res) => {
   try {
     const { storeId } = req.params;
-    console.log('Fetching store by storeId or id:', storeId);
 
     type StoreRow = {
       id: number;

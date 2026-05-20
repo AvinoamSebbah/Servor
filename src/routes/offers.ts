@@ -9,6 +9,7 @@ import {
   resolvePromoContexts,
 } from '../services/promoContext';
 import { getProductDeliveryUrl } from './images';
+import { cityScopedStoreSql, cityScopedStoreSqlForSelection } from '../utils/globalStores';
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -86,6 +87,9 @@ type RawTopPromotionRow = {
   promo_kind: string | null;
   promo_label: string | null;
   is_conditional_promo: unknown;
+  additional_is_coupon: string | null;
+  additional_restrictions: string | null;
+  club_id: string | null;
 };
 
 type RawFullPromotionRow = {
@@ -179,6 +183,8 @@ type CheaperOfferDto = {
 
 const DELIVERY_KEYWORD = 'משלוח';
 const BARCODE_ITEM_CODE_REGEX = /^[0-9]{8,14}$/;
+const YOCHANANOF_CHAIN_ID = '7290803800003';
+const DEPRIORITIZED_PROMO_SCORE_PENALTY = 1000;
 
 // Alcohol/tobacco blocklist — belt-and-suspenders fallback on top of SQL blacklist.
 // Uses negative lookbehind/lookahead (?<![א-ת]) to avoid matching inside longer Hebrew words
@@ -324,6 +330,13 @@ function ensureTopPromotionsCachePrewarm(windowHours = 0, topN = 300): Promise<v
 // void ensureTopPromotionsCachePrewarm();
 
 function mapTopPromotionRow(row: RawTopPromotionRow): TopPromotionDto {
+  const classified = classifyPromotionKind({
+    promotion_description: row.promotion_description,
+    additional_is_coupon: row.additional_is_coupon,
+    additional_restrictions: row.additional_restrictions,
+    club_id: row.club_id,
+  } satisfies Pick<RawPromoContextRow, 'promotion_description' | 'additional_is_coupon' | 'additional_restrictions' | 'club_id'>);
+
   return {
     itemCode: row.item_code,
     itemName: row.item_name,
@@ -348,9 +361,9 @@ function mapTopPromotionRow(row: RawTopPromotionRow): TopPromotionDto {
       : null,
     promotionId: row.promotion_id || null,
     promotionDescription: row.promotion_description || null,
-    promoKind: row.promo_kind || 'regular',
-    promoLabel: row.promo_label || 'מבצע',
-    isConditionalPromo: Boolean(row.is_conditional_promo),
+    promoKind: classified.promoKind || row.promo_kind || 'regular',
+    promoLabel: classified.promoLabel || row.promo_label || 'מבצע',
+    isConditionalPromo: classified.isConditionalPromo,
     updatedAt: row.updated_at ? new Date(row.updated_at).toISOString() : null,
     hasImage: row.has_image === null || row.has_image === undefined ? null : Boolean(row.has_image),
   };
@@ -424,8 +437,26 @@ function isValidTopPromotion(promo: TopPromotionDto): boolean {
   if (basePrice === null || effectivePrice === null) return false;
   if (!Number.isFinite(basePrice) || !Number.isFinite(effectivePrice)) return false;
   if (basePrice <= 0 || effectivePrice <= 0) return false;
+  if (effectivePrice < basePrice * 0.10) return false;
+
+  const discountPercent = promo.discountPercent ?? ((basePrice - effectivePrice) / basePrice) * 100;
+  if (discountPercent > 90) return false;
 
   return effectivePrice < basePrice;
+}
+
+function deprioritizedPromotionChainSql(alias: 'c' | 's'): Prisma.Sql {
+  const table = Prisma.raw(alias);
+  return Prisma.sql`(
+    ${table}.chain_id = ${YOCHANANOF_CHAIN_ID}::text
+    OR LOWER(COALESCE(${table}.chain_name, '')) = 'be'
+    OR COALESCE(${table}.chain_name, '') ILIKE '%יוחננוף%'
+    OR COALESCE(${table}.chain_name, '') ILIKE '%יוחנננוף%'
+    OR COALESCE(${table}.chain_name, '') = 'שופרסל שלי'
+    OR COALESCE(${table}.chain_name, '') = 'שופרסל דיל'
+    OR COALESCE(${table}.chain_name, '') ILIKE '%שופרסל%online%'
+    OR COALESCE(${table}.chain_name, '') ILIKE '%שופרסל%אונליין%'
+  )`;
 }
 
 function shouldHidePromoWhenConditionalFilterOff(promo: TopPromotionDto): boolean {
@@ -773,11 +804,23 @@ router.get('/top-promotions', async (req, res) => {
     // Replaces the old 10× batched calls to get_top_city_promotions (offset 0→1800).
     // That pattern was O(n²): each call re-ran DISTINCT ON + sort then skipped rows.
     // Now: one SQL query, DISTINCT ON, up to 2000 rows → Node.js filtering.
+    const isAllStoresPromoScope = !chainId && !chainName && !storeId;
 
     const fetchAllPromotionRows = async (): Promise<RawTopPromotionRow[]> => {
       const chainIdParam  = chainId  || null;
       const storeIdParam  = storeId  || null;
       const chainNameParam = chainName || null;
+      const cityFilterSql = cityScopedStoreSqlForSelection('c', city, {
+        chainId: chainIdParam,
+        chainName: chainNameParam,
+        storeId: storeIdParam,
+      }, { prefix: false });
+      const smartScoreSql = isAllStoresPromoScope
+        ? Prisma.sql`(
+            c.smart_score
+            - CASE WHEN ${deprioritizedPromotionChainSql('c')} THEN ${DEPRIORITIZED_PROMO_SCORE_PENALTY}::numeric ELSE 0::numeric END
+          )`
+        : Prisma.sql`c.smart_score`;
 
       // Resolve effective window_hours in one inline expression
       const windowExpr = windowHours === 0
@@ -798,21 +841,32 @@ router.get('/top-promotions', async (req, res) => {
             c.chain_id, c.chain_name, c.store_id, c.store_name, c.city,
             c.unit_of_measure, c.unit_qty, c.b_is_weighted,
             c.price, c.promo_price, c.effective_price, c.discount_amount, c.discount_percent,
-            c.smart_score, c.promotion_end_date, c.updated_at, c.rank_position,
+            ${smartScoreSql} AS smart_score, c.promotion_end_date, c.updated_at, c.rank_position,
             COALESCE(c.promotion_id, '') AS promotion_id,
             COALESCE(c.promotion_description, '') AS promotion_description,
             COALESCE(c.promo_kind, 'regular') AS promo_kind,
             COALESCE(c.promo_label, 'מבצע') AS promo_label,
             COALESCE(c.is_conditional_promo, FALSE) AS is_conditional_promo,
+            promo_meta.additional_is_coupon,
+            promo_meta.additional_restrictions,
+            promo_meta.club_id,
             c.has_image
-          FROM top_promotions_cache c, resolved_wh r
+          FROM top_promotions_cache c
+          CROSS JOIN resolved_wh r
+          LEFT JOIN promotions promo_meta
+            ON promo_meta.chain_id = c.chain_id
+           AND promo_meta.promotion_id = c.promotion_id
           WHERE c.window_hours = r.wh
             AND c.scope_type = 'store'
             AND c.has_image IS TRUE
-            AND c.city = ${city}
+            AND ${cityFilterSql}
             AND (${chainIdParam}::text IS NULL OR c.chain_id = ${chainIdParam}::text)
             AND (${storeIdParam}::text IS NULL OR c.store_id = ${storeIdParam}::text)
             AND (${chainNameParam}::text IS NULL OR lower(c.chain_name) = lower(${chainNameParam}::text))
+            AND c.price IS NOT NULL
+            AND c.price > 0
+            AND COALESCE(c.effective_price, c.promo_price) >= (c.price * 0.10)
+            AND COALESCE(c.discount_percent, ((c.price - COALESCE(c.effective_price, c.promo_price)) / c.price) * 100.0) <= 90
         ),
         best_per_item AS (
           SELECT DISTINCT ON (item_code) *
@@ -833,6 +887,14 @@ router.get('/top-promotions', async (req, res) => {
       const chainIdParam = chainId || null;
       const storeIdParam = storeId || null;
       const chainNameParam = chainName || null;
+      const cityFilterSql = cityScopedStoreSqlForSelection('s', city, {
+        chainId: chainIdParam,
+        chainName: chainNameParam,
+        storeId: storeIdParam,
+      }, { prefix: false });
+      const smartScorePenaltySql = isAllStoresPromoScope
+        ? Prisma.sql` - CASE WHEN ${deprioritizedPromotionChainSql('s')} THEN ${DEPRIORITIZED_PROMO_SCORE_PENALTY}::numeric ELSE 0::numeric END`
+        : Prisma.empty;
 
       return prisma.$queryRaw<RawFullPromotionRow[]>(Prisma.sql`
         WITH scoped AS (
@@ -866,7 +928,8 @@ router.get('/top-promotions', async (req, res) => {
                   ELSE 0
                 END
               ) * 0.40
-              + (LEAST(GREATEST(pp.price - LEAST(pp.price, psi.promo_price), 0), 80) * 0.60),
+              + (LEAST(GREATEST(pp.price - LEAST(pp.price, psi.promo_price), 0), 80) * 0.60)
+              ${smartScorePenaltySql},
               2
             ) AS smart_score,
             psi.promotion_end_date,
@@ -883,8 +946,7 @@ router.get('/top-promotions', async (req, res) => {
           LEFT JOIN promotions promo
             ON promo.chain_id = psi.chain_id
            AND promo.promotion_id = psi.promotion_id
-          WHERE COALESCE(s.city, '') <> ''
-            AND s.city = ${city}
+          WHERE ${cityFilterSql}
             AND (${chainIdParam}::text IS NULL OR s.chain_id = ${chainIdParam}::text)
             AND (${storeIdParam}::text IS NULL OR s.store_id = ${storeIdParam}::text)
             AND (${chainNameParam}::text IS NULL OR lower(s.chain_name) = lower(${chainNameParam}::text))
@@ -898,7 +960,7 @@ router.get('/top-promotions', async (req, res) => {
             AND pp.price IS NOT NULL
             AND pp.price > 0
             AND psi.promo_price < pp.price
-            AND psi.promo_price >= (pp.price * 0.05)
+            AND psi.promo_price >= (pp.price * 0.10)
             AND p.item_code ~ '^[0-9]{8,14}$'
             AND COALESCE(BTRIM(p.item_name), '') <> ''
             AND p.item_name NOT ILIKE '%משלוח%'
@@ -945,8 +1007,9 @@ router.get('/top-promotions', async (req, res) => {
       } else {
         let allRows = await fetchAllPromotionRows();
 
-        // Cold-start safeguard: if cache is empty, prewarm and retry once.
-        if (allRows.length === 0) {
+        // Cold-start safeguard only for the unfiltered city feed.
+        // Filtered scopes can legitimately be empty, and refreshing the global cache here is expensive.
+        if (allRows.length === 0 && !chainId && !chainName && !storeId) {
           const tWarmup = process.hrtime.bigint();
           await ensureTopPromotionsCachePrewarm(windowHours, 300);
           timingsMs.cacheWarmupSql = elapsedMs(tWarmup);
@@ -991,7 +1054,7 @@ router.get('/top-promotions', async (req, res) => {
     let storeRows: StoreFilterRow[] = [];
     if (isFirstPage) {
       const chainCacheKey = city.toLowerCase();
-      const storeCacheKey = `${city.toLowerCase()}::${chainId ?? ''}`;
+      const storeCacheKey = `${city.toLowerCase()}::${chainId ?? ''}::${chainName ?? ''}`;
 
       const cachedChains = getCachedChains(chainCacheKey);
       const cachedStores = getCachedStores(storeCacheKey);
@@ -1008,7 +1071,7 @@ router.get('/top-promotions', async (req, res) => {
                   s.chain_id,
                   COALESCE(NULLIF(s.chain_name, ''), s.chain_id)::text AS chain_name
                 FROM stores s
-                WHERE s.city ILIKE ${city}::text || '%'
+                WHERE ${cityScopedStoreSql('s', city)}
                 ORDER BY chain_name ASC
                 LIMIT 100
               `),
@@ -1022,8 +1085,9 @@ router.get('/top-promotions', async (req, res) => {
                   COALESCE(NULLIF(s.store_name, ''), s.store_id)::text AS store_name,
                   s.city::text AS city
                 FROM stores s
-                WHERE s.city ILIKE ${city}::text || '%'
+                WHERE ${cityScopedStoreSqlForSelection('s', city, { chainId, chainName })}
                   AND (${chainId || null}::text IS NULL OR s.chain_id = ${chainId || null}::text)
+                  AND (${chainName || null}::text IS NULL OR lower(s.chain_name) = lower(${chainName || null}::text))
                 ORDER BY chain_name ASC, store_name ASC
                 LIMIT 500
               `),
@@ -1048,7 +1112,8 @@ router.get('/top-promotions', async (req, res) => {
     const chainPromoCounts = new Map<string, number>();
     const storePromoCounts = new Map<string, number>();
     for (const promo of promotions) {
-      chainPromoCounts.set(promo.chainId, (chainPromoCounts.get(promo.chainId) ?? 0) + 1);
+      const chainKey = `${promo.chainId}::${promo.chainName || ''}`;
+      chainPromoCounts.set(chainKey, (chainPromoCounts.get(chainKey) ?? 0) + 1);
       const storeKey = `${promo.chainId}::${promo.storeId}`;
       storePromoCounts.set(storeKey, (storePromoCounts.get(storeKey) ?? 0) + 1);
     }
@@ -1058,7 +1123,7 @@ router.get('/top-promotions', async (req, res) => {
       .map((row) => ({
         chainId: row.chain_id,
         chainName: row.chain_name,
-        promoCount: chainPromoCounts.get(row.chain_id) ?? 0,
+        promoCount: chainPromoCounts.get(`${row.chain_id}::${row.chain_name || ''}`) ?? 0,
       }));
 
     const storeFilters = storeRows
@@ -1077,6 +1142,7 @@ router.get('/top-promotions', async (req, res) => {
     console.info('perf.offers.top-promotions', {
       city,
       chainId: chainId || null,
+      chainName: chainName || null,
       storeId: storeId || null,
       includeConditionalPromos,
       windowHours,
@@ -1100,6 +1166,7 @@ router.get('/top-promotions', async (req, res) => {
       meta: {
         city,
         chainId: chainId || null,
+        chainName: chainName || null,
         storeId: storeId || null,
         windowHours,
         lastDataUpdateAt,
@@ -1179,7 +1246,7 @@ router.get('/top-promotions/details', async (req, res) => {
       FROM stores s
       LEFT JOIN available_store_ids asi ON asi.store_id = s.id
       WHERE s.chain_id = ${chainId}::text
-        AND (${city || null}::text IS NULL OR s.city = ${city || null}::text)
+        AND ${cityScopedStoreSql('s', city || null, { prefix: false })}
       ORDER BY s.store_name ASC, s.store_id ASC
       LIMIT 500
     `);
@@ -1414,25 +1481,25 @@ router.get('/store-promos', async (req, res) => {
     const rows = await prisma.$queryRaw<RawStorePromoRow[]>(
       sortBy === 'percent'
         ? Prisma.sql`
-            SELECT * FROM public.store_promotions_cache
-            WHERE city = ${city}
-              AND time_window = ${timeWindow}
-              AND promo_type = ${promoType}
-              AND sort_metric = 'percent'
-              ${chainId ? Prisma.sql`AND chain_id = ${chainId}` : Prisma.empty}
-              ${storeId ? Prisma.sql`AND store_id = ${storeId}` : Prisma.empty}
-            ORDER BY discount_percent DESC NULLS LAST, store_db_id ASC, rank_position ASC
+            SELECT spc.* FROM public.store_promotions_cache spc
+            WHERE ${cityScopedStoreSql('spc', city, { prefix: false })}
+              AND spc.time_window = ${timeWindow}
+              AND spc.promo_type = ${promoType}
+              AND spc.sort_metric = 'percent'
+              ${chainId ? Prisma.sql`AND spc.chain_id = ${chainId}` : Prisma.empty}
+              ${storeId ? Prisma.sql`AND spc.store_id = ${storeId}` : Prisma.empty}
+            ORDER BY spc.discount_percent DESC NULLS LAST, spc.store_db_id ASC, spc.rank_position ASC
             LIMIT ${limit} OFFSET ${offset}
           `
         : Prisma.sql`
-            SELECT * FROM public.store_promotions_cache
-            WHERE city = ${city}
-              AND time_window = ${timeWindow}
-              AND promo_type = ${promoType}
-              AND sort_metric = 'savings'
-              ${chainId ? Prisma.sql`AND chain_id = ${chainId}` : Prisma.empty}
-              ${storeId ? Prisma.sql`AND store_id = ${storeId}` : Prisma.empty}
-            ORDER BY discount_amount DESC NULLS LAST, store_db_id ASC, rank_position ASC
+            SELECT spc.* FROM public.store_promotions_cache spc
+            WHERE ${cityScopedStoreSql('spc', city, { prefix: false })}
+              AND spc.time_window = ${timeWindow}
+              AND spc.promo_type = ${promoType}
+              AND spc.sort_metric = 'savings'
+              ${chainId ? Prisma.sql`AND spc.chain_id = ${chainId}` : Prisma.empty}
+              ${storeId ? Prisma.sql`AND spc.store_id = ${storeId}` : Prisma.empty}
+            ORDER BY spc.discount_amount DESC NULLS LAST, spc.store_db_id ASC, spc.rank_position ASC
             LIMIT ${limit} OFFSET ${offset}
           `
     );
@@ -1531,45 +1598,45 @@ router.get('/store-promos-meta', async (req, res) => {
       // Chaînes distinctes avec compteurs
       prisma.$queryRaw<ChainMetaRow[]>(Prisma.sql`
         SELECT
-          chain_id,
-          chain_name,
-          COUNT(DISTINCT store_db_id)::int  AS store_count,
+          spc.chain_id,
+          spc.chain_name,
+          COUNT(DISTINCT spc.store_db_id)::int  AS store_count,
           COUNT(*)::int                      AS promo_count
-        FROM public.store_promotions_cache
-        WHERE city = ${city}
-          AND time_window = ${timeWindow}::varchar
-          AND sort_metric = 'percent'
-          AND promo_type  = 'regular'
-        GROUP BY chain_id, chain_name
-        ORDER BY chain_name ASC
+        FROM public.store_promotions_cache spc
+        WHERE ${cityScopedStoreSql('spc', city, { prefix: false })}
+          AND spc.time_window = ${timeWindow}::varchar
+          AND spc.sort_metric = 'percent'
+          AND spc.promo_type  = 'regular'
+        GROUP BY spc.chain_id, spc.chain_name
+        ORDER BY spc.chain_name ASC
       `),
 
       // Magasins avec compteurs
       prisma.$queryRaw<StoreMetaRow[]>(Prisma.sql`
         SELECT
-          store_db_id,
-          chain_id,
-          chain_name,
-          store_id,
-          store_name,
-          city,
+          spc.store_db_id,
+          spc.chain_id,
+          spc.chain_name,
+          spc.store_id,
+          spc.store_name,
+          spc.city,
           COUNT(*)::int AS promo_count
-        FROM public.store_promotions_cache
-        WHERE city = ${city}
-          AND time_window = ${timeWindow}::varchar
-          AND sort_metric = 'percent'
-          AND promo_type  = 'regular'
-          AND (${chainId || null}::varchar IS NULL OR chain_id = ${chainId || null}::varchar)
-        GROUP BY store_db_id, chain_id, chain_name, store_id, store_name, city
-        ORDER BY chain_name ASC, store_name ASC
+        FROM public.store_promotions_cache spc
+        WHERE ${cityScopedStoreSql('spc', city, { prefix: false })}
+          AND spc.time_window = ${timeWindow}::varchar
+          AND spc.sort_metric = 'percent'
+          AND spc.promo_type  = 'regular'
+          AND (${chainId || null}::varchar IS NULL OR spc.chain_id = ${chainId || null}::varchar)
+        GROUP BY spc.store_db_id, spc.chain_id, spc.chain_name, spc.store_id, spc.store_name, spc.city
+        ORDER BY spc.chain_name ASC, spc.store_name ASC
       `),
 
       // Date du dernier refresh
       prisma.$queryRaw<RefreshedAtRow[]>(Prisma.sql`
         SELECT MAX(refreshed_at) AS refreshed_at
-        FROM public.store_promotions_cache
-        WHERE city = ${city}
-          AND time_window = ${timeWindow}::varchar
+        FROM public.store_promotions_cache spc
+        WHERE ${cityScopedStoreSql('spc', city, { prefix: false })}
+          AND spc.time_window = ${timeWindow}::varchar
       `),
     ]);
 

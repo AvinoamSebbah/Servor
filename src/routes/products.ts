@@ -3,6 +3,7 @@ import { PrismaClient, Prisma } from '@prisma/client';
 import { getProductDeliveryUrl } from './images';
 import { buildOffsetPagination, mapOfferRow, mapOffersToLegacyDetails, RawOfferRow } from '../services/offerMapping';
 import { classifyPromotionKind, enrichApiOffersWithPromoContext } from '../services/promoContext';
+import { cityScopedStoreSql } from '../utils/globalStores';
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -18,12 +19,17 @@ type CityCacheEntry = {
 const cityStoreIdsCache = new Map<string, CityCacheEntry>();
 
 async function getCityStoreIdsCached(city: string): Promise<string[]> {
-  const key = city.trim().toLowerCase();
+  const cityText = city.trim();
+  const key = cityText.toLowerCase();
   const now = Date.now();
   const cached = cityStoreIdsCache.get(key);
   if (cached && cached.expiresAt > now) return cached.storeIds;
 
-  const stores = await prisma.store.findMany({ where: { city: key }, select: { id: true } });
+  const stores = await prisma.$queryRaw<Array<{ id: number }>>(Prisma.sql`
+    SELECT s.id
+    FROM stores s
+    WHERE ${cityScopedStoreSql('s', cityText)}
+  `);
   const storeIds = stores.map(s => s.id.toString());
   cityStoreIdsCache.set(key, { expiresAt: now + CITY_CACHE_TTL_MS, storeIds });
   return storeIds;
@@ -45,6 +51,7 @@ type SearchCacheEntry = {
 const searchResponseCache = new Map<string, SearchCacheEntry>();
 
 let storePromoCacheCheck: { checkedAt: number; available: boolean } | null = null;
+const USE_STORE_PROMO_CACHE = process.env.USE_STORE_PROMO_CACHE === 'true';
 
 function elapsedMs(start: bigint): number {
   return Number(process.hrtime.bigint() - start) / 1_000_000;
@@ -57,6 +64,8 @@ function toServerTiming(timingsMs: Record<string, number>): string {
 }
 
 async function hasStorePromoCache(): Promise<boolean> {
+  if (!USE_STORE_PROMO_CACHE) return false;
+
   const now = Date.now();
   if (storePromoCacheCheck && now - storePromoCacheCheck.checkedAt < 60_000) {
     return storePromoCacheCheck.available;
@@ -100,6 +109,7 @@ router.get('/search', async (req, res) => {
     const query = typeof req.query.q === 'string' ? req.query.q.trim() : '';
     const city = typeof req.query.city === 'string' ? req.query.city.trim() : '';
     const chainId = typeof req.query.chainId === 'string' ? req.query.chainId.trim() : '';
+    const chainName = typeof req.query.chainName === 'string' ? req.query.chainName.trim() : '';
     const storeId = typeof req.query.storeId === 'string' ? req.query.storeId.trim() : '';
     const includeDetailsRaw = typeof req.query.includeDetails === 'string'
       ? req.query.includeDetails.trim().toLowerCase()
@@ -114,7 +124,7 @@ router.get('/search', async (req, res) => {
     const offsetRaw = Number.parseInt(String(req.query.offset ?? '0'), 10);
     const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? Math.min(limitRaw, 100) : 10;
     const offset = Number.isFinite(offsetRaw) && offsetRaw >= 0 ? offsetRaw : 0;
-    const hasNarrowStoreFilter = Boolean(chainId || storeId);
+    const hasNarrowStoreFilter = Boolean(chainId || chainName || storeId);
     const candidateMultiplier = includeDetails ? 6 : hasNarrowStoreFilter ? 8 : 2;
     const candidateMin = includeDetails ? 60 : hasNarrowStoreFilter ? 60 : limit + 5;
     const candidateMax = includeDetails ? 240 : hasNarrowStoreFilter ? 160 : 30;
@@ -131,7 +141,7 @@ router.get('/search', async (req, res) => {
       return res.status(400).json({ error: 'Query too long (max 200 characters)' });
     }
 
-    const searchCacheKey = `search|${query.toLowerCase()}|${city.toLowerCase()}|${chainId}|${storeId}|${includeDetails}|${detailsLimit}|${limit}|${offset}`;
+    const searchCacheKey = `search|${query.toLowerCase()}|${city.toLowerCase()}|${chainId}|${chainName}|${storeId}|${includeDetails}|${detailsLimit}|${limit}|${offset}`;
     if (!includeDetails) {
       const cachedSearch = searchResponseCache.get(searchCacheKey);
       if (cachedSearch && cachedSearch.expiresAt > Date.now()) {
@@ -349,7 +359,7 @@ router.get('/search', async (req, res) => {
           ${chainId || null}::text,
           ${detailsLimit}::integer,
           0::integer,
-          NULL::text
+          ${chainName || null}::text
         ) o
         LEFT JOIN LATERAL (
           SELECT chain_name FROM stores WHERE chain_id = o.chain_id AND store_id = o.store_id LIMIT 1
@@ -438,10 +448,11 @@ router.get('/search', async (req, res) => {
                 chain_id,
                 store_id,
                 COALESCE(NULLIF(chain_name, ''), chain_id)::text AS chain_name
-              FROM stores
-              WHERE (${city || null}::text IS NULL OR city = ${city || null}::text OR city ILIKE ${city || null}::text || '%')
-                AND (${chainId || null}::text IS NULL OR chain_id = ${chainId || null}::text)
-                AND (${storeId || null}::text IS NULL OR store_id = ${storeId || null}::text)
+              FROM stores s
+              WHERE ${cityScopedStoreSql('s', city || null)}
+                AND (${chainId || null}::text IS NULL OR s.chain_id = ${chainId || null}::text)
+                AND (${chainName || null}::text IS NULL OR lower(s.chain_name) = lower(${chainName || null}::text))
+                AND (${storeId || null}::text IS NULL OR s.store_id = ${storeId || null}::text)
             ),
             priced_rows AS (
               SELECT
@@ -463,7 +474,7 @@ router.get('/search', async (req, res) => {
                 (
                   COALESCE(pb.promo_price, pp.promo_price) IS NOT NULL
                   AND COALESCE(pb.promo_price, pp.promo_price) < pp.price
-                  AND COALESCE(pb.promo_price, pp.promo_price) >= (pp.price * 0.05)
+                  AND COALESCE(pb.promo_price, pp.promo_price) >= (pp.price * 0.10)
                 ) AS has_promo
               FROM selected_products sp
               JOIN products p ON p.id = sp.product_id
@@ -499,7 +510,7 @@ router.get('/search', async (req, res) => {
               WHERE promo_price IS NOT NULL
                 AND price IS NOT NULL
                 AND promo_price < price
-                AND promo_price >= (price * 0.05)
+                AND promo_price >= (price * 0.10)
               ORDER BY product_id, promo_price ASC NULLS LAST, price DESC NULLS LAST
             )
             SELECT
@@ -655,6 +666,7 @@ router.get('/search', async (req, res) => {
       query,
       city: city || null,
       chainId: chainId || null,
+      chainName: chainName || null,
       storeId: storeId || null,
       includeDetails,
       detailsLimit,
@@ -1077,6 +1089,7 @@ router.get('/search/details', async (req, res) => {
     const itemCodes = parseItemCodesQuery(req.query.itemCodes);
     const cityText = typeof req.query.city === 'string' ? req.query.city.trim() : '';
     const chainId = typeof req.query.chainId === 'string' ? req.query.chainId.trim() : '';
+    const chainName = typeof req.query.chainName === 'string' ? req.query.chainName.trim() : '';
     const storeId = typeof req.query.storeId === 'string' ? req.query.storeId.trim() : '';
     if (itemCodes.length === 0) {
       return res.json({ details: {} });
@@ -1109,7 +1122,7 @@ router.get('/search/details', async (req, res) => {
         ${chainId || null}::text,
         100::integer,
         0::integer,
-        NULL::text
+        ${chainName || null}::text
       ) o
       LEFT JOIN LATERAL (
         SELECT chain_name FROM stores WHERE chain_id = o.chain_id AND store_id = o.store_id LIMIT 1
