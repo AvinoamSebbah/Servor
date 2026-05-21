@@ -27,6 +27,7 @@ test('mapOfferRow normalizes DB row to API shape', () => {
     price: '10.90',
     promo_price: '9.90',
     effective_price: '9.90',
+    promotion_end_date: new Date('2026-04-30T00:00:00Z'),
     updated_at: new Date('2026-03-24T10:00:00Z'),
   };
 
@@ -35,6 +36,7 @@ test('mapOfferRow normalizes DB row to API shape', () => {
   assert.equal(mapped.price, 10.9);
   assert.equal(mapped.promoPrice, 9.9);
   assert.equal(mapped.effectivePrice, 9.9);
+  assert.equal(mapped.promotionEndDate, '2026-04-30');
   assert.equal(typeof mapped.updatedAt, 'string');
 });
 
@@ -64,6 +66,7 @@ test('promo is exposed only when promoPrice is strictly better than price', () =
       price: 12,
       promoPrice: 9,
       effectivePrice: 9,
+      promotionEndDate: '2026-05-31',
       updatedAt: '2026-03-24T10:00:00.000Z',
     },
   ];
@@ -71,6 +74,7 @@ test('promo is exposed only when promoPrice is strictly better than price', () =
   const details = mapOffersToLegacyDetails(offers);
   assert.equal(details.promotions.length, 1);
   assert.equal(details.promotions[0].discounted_price, '9');
+  assert.equal(details.promotions[0].promotion_end_date, '2026-05-31');
 });
 
 test('best effective price remains coherent with offers', () => {

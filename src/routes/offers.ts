@@ -1190,6 +1190,7 @@ router.get('/top-promotions/details', async (req, res) => {
     const promotionId = typeof req.query.promotionId === 'string' ? req.query.promotionId.trim() : '';
     const city = typeof req.query.city === 'string' ? req.query.city.trim() : '';
     const storeId = typeof req.query.storeId === 'string' ? req.query.storeId.trim() : '';
+    const availabilityMode = typeof req.query.availabilityMode === 'string' ? req.query.availabilityMode.trim().toLowerCase() : 'promo';
     const effectivePrice = Number.parseFloat(String(req.query.effectivePrice ?? ''));
 
     if (!itemCode || !chainId) {
@@ -1204,52 +1205,82 @@ router.get('/top-promotions/details', async (req, res) => {
       is_available: unknown;
     };
 
-    const availabilityRows = await prisma.$queryRaw<AvailabilityRow[]>(Prisma.sql`
-      WITH target_product AS (
-        SELECT id
-        FROM products
-        WHERE item_code = ${itemCode}::text
-        LIMIT 1
-      ),
-      matched_promo AS (
-        SELECT psi.promotion_id
-        FROM promotion_store_items psi
-        JOIN target_product tp ON tp.id = psi.product_id
-        JOIN stores s ON s.id = psi.store_id
-        WHERE psi.chain_id = ${chainId}::text
-          AND (${promotionId || null}::text IS NULL OR psi.promotion_id = ${promotionId || null}::text)
-          AND (${storeId || null}::text IS NULL OR s.store_id = ${storeId || null}::text)
-        ORDER BY
-          CASE
-            WHEN ${promotionId || null}::text IS NOT NULL THEN 0::numeric
-            WHEN ${Number.isFinite(effectivePrice) ? effectivePrice : null}::numeric IS NOT NULL
-              THEN ABS(COALESCE(psi.promo_price, 0) - ${Number.isFinite(effectivePrice) ? effectivePrice : null}::numeric)
-            ELSE 0::numeric
-          END ASC,
-          psi.updated_at DESC NULLS LAST,
-          psi.promotion_id ASC
-        LIMIT 1
-      ),
-      available_store_ids AS (
-        SELECT DISTINCT psi.store_id
-        FROM promotion_store_items psi
-        JOIN target_product tp ON tp.id = psi.product_id
-        JOIN matched_promo mp ON mp.promotion_id = psi.promotion_id
-        WHERE psi.chain_id = ${chainId}::text
-      )
-      SELECT
-        s.id AS store_db_id,
-        s.store_id,
-        COALESCE(NULLIF(s.store_name, ''), s.store_id)::text AS store_name,
-        s.city::text AS city,
-        CASE WHEN asi.store_id IS NULL THEN FALSE ELSE TRUE END AS is_available
-      FROM stores s
-      LEFT JOIN available_store_ids asi ON asi.store_id = s.id
-      WHERE s.chain_id = ${chainId}::text
-        AND ${cityScopedStoreSql('s', city || null, { prefix: false })}
-      ORDER BY s.store_name ASC, s.store_id ASC
-      LIMIT 500
-    `);
+    const availabilityRows = availabilityMode === 'product'
+      ? await prisma.$queryRaw<AvailabilityRow[]>(Prisma.sql`
+          WITH target_product AS (
+            SELECT id
+            FROM products
+            WHERE item_code = ${itemCode}::text
+            LIMIT 1
+          ),
+          available_store_ids AS (
+            SELECT DISTINCT pp.store_id
+            FROM product_prices pp
+            JOIN target_product tp ON tp.id = pp.product_id
+            WHERE pp.price IS NOT NULL
+          )
+          SELECT
+            s.id AS store_db_id,
+            s.store_id,
+            COALESCE(NULLIF(s.store_name, ''), s.store_id)::text AS store_name,
+            s.city::text AS city,
+            CASE WHEN asi.store_id IS NULL THEN FALSE ELSE TRUE END AS is_available
+          FROM stores s
+          LEFT JOIN available_store_ids asi ON asi.store_id = s.id
+          WHERE s.chain_id = ${chainId}::text
+            AND ${cityScopedStoreSql('s', city || null, { prefix: false })}
+          ORDER BY
+            CASE WHEN ${storeId || null}::text IS NOT NULL AND s.store_id = ${storeId || null}::text THEN 0 ELSE 1 END,
+            s.store_name ASC,
+            s.store_id ASC
+          LIMIT 500
+        `)
+      : await prisma.$queryRaw<AvailabilityRow[]>(Prisma.sql`
+          WITH target_product AS (
+            SELECT id
+            FROM products
+            WHERE item_code = ${itemCode}::text
+            LIMIT 1
+          ),
+          matched_promo AS (
+            SELECT psi.promotion_id
+            FROM promotion_store_items psi
+            JOIN target_product tp ON tp.id = psi.product_id
+            JOIN stores s ON s.id = psi.store_id
+            WHERE psi.chain_id = ${chainId}::text
+              AND (${promotionId || null}::text IS NULL OR psi.promotion_id = ${promotionId || null}::text)
+              AND (${storeId || null}::text IS NULL OR s.store_id = ${storeId || null}::text)
+            ORDER BY
+              CASE
+                WHEN ${promotionId || null}::text IS NOT NULL THEN 0::numeric
+                WHEN ${Number.isFinite(effectivePrice) ? effectivePrice : null}::numeric IS NOT NULL
+                  THEN ABS(COALESCE(psi.promo_price, 0) - ${Number.isFinite(effectivePrice) ? effectivePrice : null}::numeric)
+                ELSE 0::numeric
+              END ASC,
+              psi.updated_at DESC NULLS LAST,
+              psi.promotion_id ASC
+            LIMIT 1
+          ),
+          available_store_ids AS (
+            SELECT DISTINCT psi.store_id
+            FROM promotion_store_items psi
+            JOIN target_product tp ON tp.id = psi.product_id
+            JOIN matched_promo mp ON mp.promotion_id = psi.promotion_id
+            WHERE psi.chain_id = ${chainId}::text
+          )
+          SELECT
+            s.id AS store_db_id,
+            s.store_id,
+            COALESCE(NULLIF(s.store_name, ''), s.store_id)::text AS store_name,
+            s.city::text AS city,
+            CASE WHEN asi.store_id IS NULL THEN FALSE ELSE TRUE END AS is_available
+          FROM stores s
+          LEFT JOIN available_store_ids asi ON asi.store_id = s.id
+          WHERE s.chain_id = ${chainId}::text
+            AND ${cityScopedStoreSql('s', city || null, { prefix: false })}
+          ORDER BY s.store_name ASC, s.store_id ASC
+          LIMIT 500
+        `);
 
     const cheaperRows = await prisma.$queryRaw<RawOfferRow[]>(Prisma.sql`
       SELECT

@@ -15,6 +15,7 @@ export type RawOfferRow = {
   b_is_weighted?: unknown;
   promotion_id?: string | null;
   promotion_description?: string | null;
+  promotion_end_date?: Date | string | null;
   promo_kind?: string | null;
   promo_label?: string | null;
   is_conditional_promo?: unknown;
@@ -38,6 +39,7 @@ export type ApiOffer = {
   bIsWeighted?: boolean;
   promotionId?: string | null;
   promotionDescription?: string | null;
+  promotionEndDate?: string | null;
   promoKind?: string | null;
   promoLabel?: string | null;
   isConditionalPromo?: boolean;
@@ -69,7 +71,7 @@ type LegacyDetailShape = {
     promotion_id: string;
     promotion_description: string | null;
     promotion_start_date: string;
-    promotion_end_date: string;
+    promotion_end_date: string | null;
     club_id: null;
     chain_id: string;
     discounted_price: string;
@@ -156,6 +158,9 @@ export function mapOfferRow(row: RawOfferRow): ApiOffer {
     bIsWeighted: toBoolean(row.b_is_weighted),
     promotionId: row.promotion_id ?? null,
     promotionDescription: row.promotion_description ?? null,
+    promotionEndDate: row.promotion_end_date
+      ? new Date(row.promotion_end_date).toISOString().slice(0, 10)
+      : null,
     promoKind: row.promo_kind ?? null,
     promoLabel: row.promo_label ?? null,
     isConditionalPromo: toBoolean(row.is_conditional_promo),
@@ -210,7 +215,7 @@ export function mapOffersToLegacyDetails(offers: ApiOffer[]): LegacyDetailShape 
         promotion_id: offer.promotionId ?? `promo-${offer.chainId}-${offer.storeId}`,
         promotion_description: offer.promotionDescription ?? null,
         promotion_start_date: '1970-01-01',
-        promotion_end_date: '2999-12-31',
+        promotion_end_date: offer.promotionEndDate ?? null,
         club_id: null,
         chain_id: offer.chainId,
         discounted_price: promoValue.toString(),

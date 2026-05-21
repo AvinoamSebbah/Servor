@@ -13,6 +13,7 @@ export type PromoLookupInput = {
 export type PromoContext = {
   promotionId: string | null;
   promotionDescription: string | null;
+  promotionEndDate: string | null;
   promoKind: PromoKind;
   promoLabel: string;
   isConditionalPromo: boolean;
@@ -24,6 +25,7 @@ export type RawPromoContextRow = {
   store_id: string;
   promotion_id: string | null;
   promotion_description: string | null;
+  promotion_end_date: Date | string | null;
   additional_is_coupon: string | null;
   additional_restrictions: string | null;
   club_id: string | null;
@@ -120,6 +122,7 @@ export function classifyPromotionKind(row: Pick<RawPromoContextRow, 'promotion_d
   return {
     promotionId: null,
     promotionDescription: row.promotion_description,
+    promotionEndDate: null,
     promoKind,
     promoLabel: HEBREW_LABELS[promoKind],
     isConditionalPromo: promoKind !== 'regular',
@@ -134,6 +137,7 @@ export function fallbackPromoContext(): PromoContext {
   return {
     promotionId: null,
     promotionDescription: null,
+    promotionEndDate: null,
     promoKind: 'regular',
     promoLabel: HEBREW_LABELS.regular,
     isConditionalPromo: false,
@@ -187,6 +191,7 @@ export async function resolvePromoContexts(
       ir.store_id,
       cand.promotion_id,
       cand.promotion_description,
+      cand.promotion_end_date,
       cand.additional_is_coupon,
       cand.additional_restrictions,
       cand.club_id
@@ -196,6 +201,7 @@ export async function resolvePromoContexts(
     LEFT JOIN LATERAL (
       SELECT
         psi.promotion_id,
+        psi.promotion_end_date,
         p.promotion_description,
         p.additional_is_coupon,
         p.additional_restrictions,
@@ -235,6 +241,9 @@ export async function resolvePromoContexts(
     result.set(key, {
       promotionId: row.promotion_id,
       promotionDescription: row.promotion_description,
+      promotionEndDate: row.promotion_end_date
+        ? new Date(row.promotion_end_date).toISOString().slice(0, 10)
+        : null,
       promoKind: classified.promoKind,
       promoLabel: classified.promoLabel,
       isConditionalPromo: classified.isConditionalPromo,
@@ -277,6 +286,7 @@ export async function enrichApiOffersWithPromoContext(
       ...offer,
       promotionId: context.promotionId,
       promotionDescription: context.promotionDescription,
+      promotionEndDate: context.promotionEndDate,
       promoKind: context.promoKind,
       promoLabel: context.promoLabel,
       isConditionalPromo: context.isConditionalPromo,
